@@ -21,11 +21,19 @@ export class DLLLoader {
     private _searchPaths: string[];
     private _loadedDLLs: Map<string, LoadedDLL> = new Map();
     private _addressMappings: AddressMapping[] = []; // Sorted list of address ranges
+    private _dllBases: Map<string, number> = new Map(); // Pre-assigned bases for consistency
     private _nextDLLBase: number = 0x10000000; // Start DLLs at 0x10000000
     private _dllSize: number = 0x01000000; // Each DLL gets 16MB of address space
 
     constructor(searchPaths: string[] = []) {
         this._searchPaths = searchPaths;
+    }
+
+    /**
+     * Pre-assign a base address for a DLL to ensure consistent loading order
+     */
+    assignDLLBase(dllName: string, baseAddress: number): void {
+        this._dllBases.set(dllName.toLowerCase(), baseAddress);
     }
 
     /**
@@ -83,8 +91,18 @@ export class DLLLoader {
             const exe = new EXEFile(dllPath);
 
             // Allocate memory for the DLL
-            const baseAddress = this._nextDLLBase;
-            this._nextDLLBase += 0x01000000; // Each DLL gets 16MB of address space
+            // Use pre-assigned base if available, otherwise allocate next available
+            let baseAddress: number;
+            if (this._dllBases.has(key)) {
+                baseAddress = this._dllBases.get(key)!;
+                // Update _nextDLLBase if this pre-assigned base is higher than our current next
+                if (baseAddress + 0x01000000 > this._nextDLLBase) {
+                    this._nextDLLBase = baseAddress + 0x01000000;
+                }
+            } else {
+                baseAddress = this._nextDLLBase;
+                this._nextDLLBase += 0x01000000; // Each DLL gets 16MB of address space
+            }
 
             // Load all sections into memory
             for (const section of exe.sectionHeaders) {

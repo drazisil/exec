@@ -64,6 +64,56 @@ instruction or error in a resolved DLL function, not an unresolved import.
 - Still needs: actual FS-relative memory access in real code
 - Current test doesn't exercise FS:[offset] addressing yet
 
+#### FIXED: DLL Loading Order Relocation Bug
+**Original Problem:**
+- Execution started at 0x009fc980 ✓
+- Jumped to 0x12022cb0 (thought to be KERNEL32) ✗
+- Crashed with "Unknown opcode: 0x00"
+
+**Root Cause - DLL Loading Order Issue:**
+DLLs were loaded in import table order, not a fixed order:
+1. When d3d8.dll was encountered first, it got base 0x10000000
+2. This pushed KERNEL32.dll to 0x11000000 or later
+3. But KERNEL32's relocations were calculated for being at 0x10000000
+4. Result: All of KERNEL32's absolute addresses were off by one DLL slot (0x01000000)
+
+**The Fix:**
+- Added `assignDLLBase()` method to DLLLoader
+- Pre-assign critical system DLLs to known addresses BEFORE calling buildIATMap():
+  - ADVAPI32.dll → 0x10000000
+  - KERNEL32.dll → 0x11000000
+  - MSVCRT.dll → 0x12000000
+  - NTDLL.dll → 0x13000000
+  - USER32.dll → 0x14000000
+  - GDI32.dll → 0x15000000
+  - SHELL32.dll → 0x16000000
+  - ole32.dll → 0x17000000
+  - OLEAUT32.dll → 0x18000000
+- Other DLLs start at 0x19000000 and up
+- This ensures relocations are applied with correct deltas
+
+#### Current Status After Fix
+**Good news:** DLL loading order fixed! All system DLLs now at consistent addresses.
+**Still crashing:** At address 0x000a54f0 (which is below image base!)
+- RVA: -0x35ab10 (invalid)
+- Content: all NULL bytes
+- Indicates pointer/address calculation error in game code, not a loading issue
+
+**Debugging Scripts Created:**
+- `check-crash-addr.ts` - Verify where crash address falls in sections
+- `debug-relocation.ts` - Verify relocations are applied correctly
+- `check-kernel32.ts` - Check DLL bounds and loaded code
+- `trace-with-stack.ts` - Trace execution with stack contents at crash
+- `verify-load.ts` - Verify section loading into memory
+- `check-mappings.ts` - Check DLL address mappings
+
+**Script Debugging Notes:**
+- `trace-jump.ts` was missing section loading - fixed by adding mem.load() loop
+- `debug-entry.ts` had `section.flags` property error - should be `section.characteristics`
+- Bash script execution with template literals requires Write tool, not Bash with heredoc
+- DLL pre-assignment prevents load-order dependent relocation issues
+- Must reset `_nextDLLBase` after pre-assigning critical DLLs
+
 ### Files Modified This Session
 
 **New:**
