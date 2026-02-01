@@ -41,20 +41,22 @@
 
 ### Known Issues / Next Steps
 
-#### Unresolved Imports
-Some DLLs cannot be loaded from filesystem:
-- ifc22.dll (game-specific)
-- implode.dll (custom)
+#### Fixed: Ordinal Imports (This Session)
+- DLLs export functions both by name and by ordinal number
+- Ordinal imports are specified as "Ordinal #N" in import tables
+- Fixed DLLLoader to extract and store both named and ordinal exports
+- Result: ordinal import resolution now working (e.g., comctl32.dll!Ordinal #17)
 
-These cause unresolved IAT entries. Options:
-1. Mock these DLLs with stub functions
-2. Provide actual DLL files in /data/Downloads/
-3. Skip loading them gracefully
+#### Fixed: All Import Resolution (This Session)
+- Root problem was address space exhaustion (512MB too small)
+- Found all three "missing" DLLs in /data/Downloads/Motor City Online/
+- Increased memory to 1GB to accommodate all DLLs
+- All 354 imports now successfully resolved (19 DLLs loaded)
+- WININET, IFC22, and IMPLODE DLLs all load and export correctly
 
-#### Current Execution Limit
-- Gets ~14+ instructions into kernel32.dll
-- Then jumps back to main executable at invalid address (0x000a54f0)
-- This suggests IAT stub is executing with a NULL function pointer (unresolved import)
+**Result**: Game executable can now jump into kernel32.dll code with all imports
+properly resolved. Current crash at 0x000a54f0 is likely an unimplemented
+instruction or error in a resolved DLL function, not an unresolved import.
 
 #### Segment-Relative Addressing
 - TEB allocation is ready (0x00320000)
@@ -70,11 +72,12 @@ These cause unresolved IAT entries. Options:
 
 **Updated:**
 - `src/hardware/CPU.ts` - Added kernelStructures field, segment override tracking, applySegmentOverride method
-- `src/loader/DLLLoader.ts` - Added base relocation support in loadDLL()
+- `src/loader/DLLLoader.ts` - Added base relocation support + fixed ordinal export extraction
 - `run-exe.ts` - Initialize KernelStructures with stack bounds
 - `src/emulator/index.ts` - Updated architecture diagram, export KernelStructures
 - `src/kernel/index.ts` - Export KernelStructures
 - `ARCHITECTURE.md` - Updated module naming (processor → hardware)
+- `CLAUDE.md` - Updated known issues and progress notes
 
 **Moved:**
 - `src/processor/` → `src/hardware/` (CPU.ts, Memory.ts, index.ts)

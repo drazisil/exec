@@ -114,13 +114,23 @@ export class DLLLoader {
                 }
             }
 
-            // Extract exports
+            // Extract exports (both named and ordinal)
             const exports = new Map<string, number>();
             if (exe.exportTable) {
                 for (const exp of exe.exportTable.entries) {
                     const funcAddr = baseAddress + exp.rva;
-                    exports.set(exp.name, funcAddr);
-                    console.log(`  [Export] ${exp.name} @ 0x${funcAddr.toString(16)}`);
+
+                    // Store by name if available
+                    if (exp.name) {
+                        exports.set(exp.name, funcAddr);
+                    }
+
+                    // Also store by ordinal (format: "Ordinal #N")
+                    const ordinalKey = `Ordinal #${exp.ordinal}`;
+                    exports.set(ordinalKey, funcAddr);
+
+                    const exportLabel = exp.name ? exp.name : ordinalKey;
+                    console.log(`  [Export] ${exportLabel} @ 0x${funcAddr.toString(16)}`);
                 }
             }
 
@@ -147,6 +157,10 @@ export class DLLLoader {
             return dll;
         } catch (err: any) {
             console.log(`[DLLLoader] Failed to load ${dllName}: ${err.message}`);
+            if (err.stack) {
+                const lines = err.stack.split('\n').slice(0, 3);
+                lines.forEach((line: string) => console.log(`  ${line}`));
+            }
             return null;
         }
     }

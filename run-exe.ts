@@ -6,6 +6,7 @@ const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 console.log("=== Loading PE File ===\n");
 const exe = new EXEFile(exePath, [
     "/home/drazisil/mco-source/MCity",
+    "/data/Downloads/Motor City Online",
     "/data/Downloads",
     "/data/Downloads/msvcrt",
     "/data/Downloads/kernel32",
@@ -42,8 +43,8 @@ const entrySection = exe.sectionHeaders.find(s =>
 );
 console.log(`Entry point in section: ${entrySection?.name || "NOT FOUND"}`);
 
-// Create emulator with 512MB memory
-const mem = new Memory(512 * 1024 * 1024);
+// Create emulator with 1GB memory (needed for many DLLs)
+const mem = new Memory(1024 * 1024 * 1024);
 const cpu = new CPU(mem);
 
 // Initialize kernel structures (TEB/PEB)

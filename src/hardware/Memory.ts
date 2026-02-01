@@ -58,6 +58,9 @@ export class Memory {
     }
 
     load(addr: number, data: Buffer | Uint8Array): void {
+        if (addr + data.length > this._buffer.byteLength) {
+            throw new Error(`load: cannot fit ${data.length} bytes at 0x${(addr >>> 0).toString(16)}, would exceed bounds 0x${this._buffer.byteLength.toString(16)}`);
+        }
         this._bytes.set(data, addr);
     }
 
