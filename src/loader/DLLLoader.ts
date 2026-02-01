@@ -21,19 +21,46 @@ export class DLLLoader {
     private _searchPaths: string[];
     private _loadedDLLs: Map<string, LoadedDLL> = new Map();
     private _addressMappings: AddressMapping[] = []; // Sorted list of address ranges
-    private _dllBases: Map<string, number> = new Map(); // Pre-assigned bases for consistency
-    private _nextDLLBase: number = 0x10000000; // Start DLLs at 0x10000000
     private _dllSize: number = 0x01000000; // Each DLL gets 16MB of address space
+    private _maxAddress: number = 0x40000000; // Max addressable (1GB)
 
     constructor(searchPaths: string[] = []) {
         this._searchPaths = searchPaths;
     }
 
     /**
-     * Pre-assign a base address for a DLL to ensure consistent loading order
+     * Check if an address range is already allocated
      */
-    assignDLLBase(dllName: string, baseAddress: number): void {
-        this._dllBases.set(dllName.toLowerCase(), baseAddress);
+    private isAddressRangeAvailable(baseAddress: number, size: number): boolean {
+        const endAddress = baseAddress + size - 1;
+        for (const mapping of this._addressMappings) {
+            // Check if this range overlaps with any existing mapping
+            if (!(endAddress < mapping.baseAddress || baseAddress > mapping.endAddress)) {
+                return false; // Overlap detected
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Find next available address slot for a DLL
+     */
+    private findAvailableBase(preferredBase: number): number {
+        // Try preferred base first
+        if (preferredBase > 0 && preferredBase < this._maxAddress) {
+            if (this.isAddressRangeAvailable(preferredBase, this._dllSize)) {
+                return preferredBase;
+            }
+        }
+
+        // Fallback: scan from 0x10000000 upward for first available slot
+        for (let base = 0x10000000; base < this._maxAddress; base += this._dllSize) {
+            if (this.isAddressRangeAvailable(base, this._dllSize)) {
+                return base;
+            }
+        }
+
+        throw new Error(`No available address space for DLL (needed 0x${this._dllSize.toString(16)} bytes)`);
     }
 
     /**
@@ -90,18 +117,14 @@ export class DLLLoader {
             console.log(`[DLLLoader] Loading ${dllName} from ${dllPath}`);
             const exe = new EXEFile(dllPath);
 
-            // Allocate memory for the DLL
-            // Use pre-assigned base if available, otherwise allocate next available
-            let baseAddress: number;
-            if (this._dllBases.has(key)) {
-                baseAddress = this._dllBases.get(key)!;
-                // Update _nextDLLBase if this pre-assigned base is higher than our current next
-                if (baseAddress + 0x01000000 > this._nextDLLBase) {
-                    this._nextDLLBase = baseAddress + 0x01000000;
-                }
+            // Windows-style DLL loading: try preferred base, fall back if conflict
+            const preferredBase = exe.optionalHeader.imageBase;
+            const baseAddress = this.findAvailableBase(preferredBase);
+
+            if (baseAddress === preferredBase) {
+                console.log(`  Loaded at preferred base 0x${baseAddress.toString(16)}`);
             } else {
-                baseAddress = this._nextDLLBase;
-                this._nextDLLBase += 0x01000000; // Each DLL gets 16MB of address space
+                console.log(`  Preferred base 0x${preferredBase.toString(16)} unavailable, using 0x${baseAddress.toString(16)}`);
             }
 
             // Load all sections into memory
@@ -112,7 +135,6 @@ export class DLLLoader {
 
             // Apply base relocations
             // The relocation delta is the difference between where we loaded it and where it was compiled for
-            const preferredBase = exe.optionalHeader.imageBase;
             const relocationDelta = (baseAddress - preferredBase) >>> 0;
 
             if (relocationDelta !== 0 && exe.baseRelocationTable) {

@@ -54,32 +54,7 @@ cpu.kernelStructures = kernelStructures;
 // Set memory so import resolver can load DLLs
 exe.importResolver.setMemory(mem);
 
-// Pre-assign base addresses for critical system DLLs only
-// This ensures they have predictable addresses for correct relocations
-const dllLoader = exe.importResolver.getDLLLoader();
-const criticalDLLs: [string, number][] = [
-    ["ADVAPI32.dll", 0x10000000],
-    ["KERNEL32.dll", 0x11000000],
-    ["MSVCRT.dll", 0x12000000],
-    ["NTDLL.dll", 0x13000000],
-    ["USER32.dll", 0x14000000],
-    ["GDI32.dll", 0x15000000],
-    ["SHELL32.dll", 0x16000000],
-    ["ole32.dll", 0x17000000],
-    ["OLEAUT32.dll", 0x18000000],
-];
-
-for (const [dll, base] of criticalDLLs) {
-    dllLoader.assignDLLBase(dll, base);
-}
-
-// Reset the next available base to just after our critical DLLs
-// This prevents non-critical DLLs from claiming the same space
-(dllLoader as any)._nextDLLBase = 0x19000000; // Start after oleaut32 at 0x18000000
-
-console.log(`\n=== Pre-assigned critical system DLLs ===\n`);
-
-// Build the IAT map by loading real DLLs
+// Build the IAT map by loading real DLLs (Windows-style preferred base loading)
 exe.importResolver.buildIATMap(exe.importTable, exe.optionalHeader.imageBase);
 
 // Register all opcodes

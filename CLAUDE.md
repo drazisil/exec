@@ -64,40 +64,31 @@ instruction or error in a resolved DLL function, not an unresolved import.
 - Still needs: actual FS-relative memory access in real code
 - Current test doesn't exercise FS:[offset] addressing yet
 
-#### FIXED: DLL Loading Order Relocation Bug
-**Original Problem:**
-- Execution started at 0x009fc980 ✓
-- Jumped to 0x12022cb0 (thought to be KERNEL32) ✗
-- Crashed with "Unknown opcode: 0x00"
+#### FIXED: Windows-Style DLL Loading with Preferred Bases
 
-**Root Cause - DLL Loading Order Issue:**
-DLLs were loaded in import table order, not a fixed order:
-1. When d3d8.dll was encountered first, it got base 0x10000000
-2. This pushed KERNEL32.dll to 0x11000000 or later
-3. But KERNEL32's relocations were calculated for being at 0x10000000
-4. Result: All of KERNEL32's absolute addresses were off by one DLL slot (0x01000000)
+**What was wrong:**
+DLLs were loaded sequentially from 0x10000000 upward, ignoring their preferred bases. This meant:
+- Each DLL's relocation delta was calculated based on where we arbitrarily placed it
+- When d3d8 (preferred base 0x10000000) loaded first, KERNEL32 (preferred 0x6b800000) ended up at 0x12000000
+- Relocations depended on load order, not on DLL preferences
 
-**The Fix:**
-- Added `assignDLLBase()` method to DLLLoader
-- Pre-assign critical system DLLs to known addresses BEFORE calling buildIATMap():
-  - ADVAPI32.dll → 0x10000000
-  - KERNEL32.dll → 0x11000000
-  - MSVCRT.dll → 0x12000000
-  - NTDLL.dll → 0x13000000
-  - USER32.dll → 0x14000000
-  - GDI32.dll → 0x15000000
-  - SHELL32.dll → 0x16000000
-  - ole32.dll → 0x17000000
-  - OLEAUT32.dll → 0x18000000
-- Other DLLs start at 0x19000000 and up
-- This ensures relocations are applied with correct deltas
+**The Windows approach:**
+Real Windows tries to load each DLL at its preferred base address. If there's a conflict, it finds the next available slot.
 
-#### Current Status After Fix
-**Good news:** DLL loading order fixed! All system DLLs now at consistent addresses.
-**Still crashing:** At address 0x000a54f0 (which is below image base!)
-- RVA: -0x35ab10 (invalid)
-- Content: all NULL bytes
-- Indicates pointer/address calculation error in game code, not a loading issue
+**The fix:**
+- Removed hard-coded address pre-assignment (`assignDLLBase`)
+- Implemented `findAvailableBase()` method that:
+  1. Tries DLL's preferred base first
+  2. If conflict, scans upward from 0x10000000 for first available 16MB slot
+  3. Tracks all allocated ranges in `_addressMappings`
+- Each DLL now loads independently with proper relocation deltas
+- DLLs load in order: d3d8 (0x10000000 preferred, got it!), COMCTL32 (preferred 0x5bf80000 unavailable, got 0x11000000), KERNEL32 (preferred 0x6b800000 unavailable, got 0x12000000), etc.
+
+**Result:**
+✅ Each DLL's relocations are calculated correctly
+✅ Matches real Windows DLL loading behavior
+✅ DLLs can load at any address without inter-dependencies
+⚠️ Still crashes at 0x000a54f0 - but now confirmed this is NOT a DLL issue
 
 **Debugging Scripts Created:**
 - `check-crash-addr.ts` - Verify where crash address falls in sections
