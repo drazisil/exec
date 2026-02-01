@@ -209,7 +209,19 @@ export class CPU {
 
     // --- Execution ---
 
+    private skipPrefix(): void {
+        // x86 prefix bytes that we skip for now
+        // 0x26 = ES:, 0x2E = CS:, 0x36 = SS:, 0x3E = DS:, 0x64 = FS:, 0x65 = GS:
+        // 0x66 = Operand size override, 0x67 = Address size override
+        // 0xF0 = LOCK, 0xF2 = REPNE/REPNZ, 0xF3 = REP/REPE/REPZ
+        const prefixBytes = new Set([0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3]);
+        while (prefixBytes.has(this.memory.read8(this.eip))) {
+            this.fetch8(); // skip the prefix byte
+        }
+    }
+
     step(): void {
+        this.skipPrefix();
         const opcode = this.fetch8();
         const handler = this._opcodeTable.get(opcode);
         if (!handler) {

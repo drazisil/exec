@@ -12,6 +12,7 @@ import { LoadConfigDirectory } from "./LoadConfigDirectory.ts";
 import { OptionalHeader } from "./OptionalHeader.ts";
 import { SectionHeader } from "./SectionHeader.ts";
 import { TLSDirectory } from "./TLSTable.ts";
+import { ImportResolver } from "./emulator/ImportResolver.ts";
 
 
 export class EXEFile {
@@ -31,8 +32,9 @@ export class EXEFile {
     private _loadConfigDirectory: LoadConfigDirectory | null = null;
     private _boundImportTable: BoundImportTable | null = null;
     private _delayImportTable: DelayImportTable | null = null;
+    private _importResolver: ImportResolver;
 
-    constructor(filePath: string) {
+    constructor(filePath: string, dllSearchPaths: string[] = []) {
         this._filePath = filePath;
         console.log(`loading ${this._filePath}`);
         this._fileImage = (readFileSync(this._filePath)) as unknown as Buffer;
@@ -61,6 +63,9 @@ export class EXEFile {
         }
 
         this.parseDataDirectories();
+
+        // Initialize the import resolver
+        this._importResolver = new ImportResolver({ dllSearchPaths });
     }
 
     private parseDataDirectories() {
@@ -194,6 +199,10 @@ export class EXEFile {
 
     get delayImportTable() {
         return this._delayImportTable;
+    }
+
+    get importResolver() {
+        return this._importResolver;
     }
 
     toString() {

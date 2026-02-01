@@ -4,7 +4,11 @@ import { CPU, Memory, REG, registerAllOpcodes } from "./src/emulator/index.ts";
 const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 
 console.log("=== Loading PE File ===\n");
-const exe = new EXEFile(exePath);
+const exe = new EXEFile(exePath, [
+    "/home/drazisil/mco-source/MCity",
+    "C:\\Windows\\System32",
+    "C:\\Windows\\SysWOW64",
+]);
 
 console.log(`Entry point RVA: 0x${exe.optionalHeader.addressOfEntryPoint.toString(16)}`);
 console.log(`Image base: 0x${exe.optionalHeader.imageBase.toString(16)}`);
@@ -22,8 +26,11 @@ console.log(`Entry point in section: ${entrySection?.name || "NOT FOUND"}`);
 const mem = new Memory(512 * 1024 * 1024);
 const cpu = new CPU(mem);
 
-// Register all opcodes
-registerAllOpcodes(cpu);
+// Set up import resolver
+exe.importResolver.buildIATMap(exe.importTable, exe.optionalHeader.imageBase);
+
+// Register all opcodes (with import resolver for stub handling)
+registerAllOpcodes(cpu, exe.importResolver);
 
 // Set up interrupt handler for INT 3 (breakpoint) and INT 0x20 (DOS exit)
 cpu.onInterrupt((intNum, cpu) => {
@@ -48,6 +55,9 @@ for (const section of exe.sectionHeaders) {
     totalLoaded += section.data.byteLength;
 }
 console.log(`Total: ${totalLoaded} bytes`);
+
+// Write IAT stubs after loading sections
+exe.importResolver.writeIATStubs(mem, exe.optionalHeader.imageBase, exe.importTable);
 
 // Set up CPU state
 // Entry point is an RVA; find its actual memory address

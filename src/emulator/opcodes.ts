@@ -1,11 +1,13 @@
 import { CPU, REG, FLAG } from "./CPU.ts";
+import type { ImportResolver } from "./ImportResolver.ts";
 
-export function registerAllOpcodes(cpu: CPU): void {
+export function registerAllOpcodes(cpu: CPU, importResolver?: ImportResolver): void {
     registerDataMovement(cpu);
     registerArithmetic(cpu);
     registerLogic(cpu);
     registerStack(cpu);
-    registerControlFlow(cpu);
+    registerControlFlow(cpu, importResolver);
+    registerGroup5(cpu, importResolver);
     registerMisc(cpu);
 }
 
@@ -301,12 +303,23 @@ function registerStack(cpu: CPU): void {
 // Control Flow
 // ============================================================
 
-function registerControlFlow(cpu: CPU): void {
+function registerControlFlow(cpu: CPU, importResolver?: ImportResolver): void {
     // CALL rel32
     cpu.register(0xE8, (cpu) => {
         const rel = cpu.fetchSigned32();
+        const target = (cpu.eip + rel) >>> 0;
         cpu.push32(cpu.eip);
-        cpu.eip = (cpu.eip + rel) >>> 0;
+
+        // Check if target is a stub
+        if (importResolver && importResolver.isStubAddress(target)) {
+            const handler = importResolver.getStubHandler(target);
+            if (handler) {
+                handler(cpu);
+                return;
+            }
+        }
+
+        cpu.eip = target;
     });
 
     // RET
@@ -352,6 +365,71 @@ function registerControlFlow(cpu: CPU): void {
             }
         });
     }
+}
+
+// ============================================================
+// Group 5 (0xFF)
+// ============================================================
+
+function registerGroup5(cpu: CPU, importResolver?: ImportResolver): void {
+    // Group 5: 0xFF — op r/m32
+    cpu.register(0xFF, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const operand = cpu.readRM32(mod, rm);
+
+        switch (reg) {
+            case 0: { // INC r/m32
+                const result = (operand + 1) >>> 0;
+                cpu.writeRM32(mod, rm, result);
+                const savedCF = cpu.getFlag(FLAG.CF);
+                cpu.updateFlagsArith(operand + 1, operand, 1, false);
+                cpu.setFlag(FLAG.CF, savedCF); // Restore CF (INC doesn't affect it)
+                break;
+            }
+            case 1: { // DEC r/m32
+                const result = (operand - 1) >>> 0;
+                cpu.writeRM32(mod, rm, result);
+                const savedCF = cpu.getFlag(FLAG.CF);
+                cpu.updateFlagsArith(operand - 1, operand, 1, true);
+                cpu.setFlag(FLAG.CF, savedCF); // Restore CF (DEC doesn't affect it)
+                break;
+            }
+            case 2: { // CALL r/m32
+                cpu.push32(cpu.eip);
+
+                // Check if target is a stub
+                if (importResolver && importResolver.isStubAddress(operand)) {
+                    const handler = importResolver.getStubHandler(operand);
+                    if (handler) {
+                        handler(cpu);
+                        break;
+                    }
+                }
+
+                cpu.eip = operand;
+                break;
+            }
+            case 4: { // JMP r/m32
+                // Check if target is a stub
+                if (importResolver && importResolver.isStubAddress(operand)) {
+                    const handler = importResolver.getStubHandler(operand);
+                    if (handler) {
+                        handler(cpu);
+                        break;
+                    }
+                }
+
+                cpu.eip = operand;
+                break;
+            }
+            case 6: { // PUSH r/m32
+                cpu.push32(operand);
+                break;
+            }
+            default:
+                throw new Error(`Unsupported Group 5 extension: /${reg} (0xFF /${reg})`);
+        }
+    });
 }
 
 // ============================================================
