@@ -1,4 +1,5 @@
 import { Memory } from "./Memory.ts";
+import type { KernelStructures } from "../kernel/KernelStructures.ts";
 
 export type OpcodeHandler = (cpu: CPU) => void;
 
@@ -22,10 +23,12 @@ export class CPU {
     eflags: number;
     memory: Memory;
     halted: boolean;
+    kernelStructures: KernelStructures | null;
     private _opcodeTable: Map<number, OpcodeHandler>;
     private _intHandler: ((intNum: number, cpu: CPU) => void) | null;
     private _exceptionHandler: ((error: Error, cpu: CPU) => void) | null;
     private _stepCount: number;
+    private _segmentOverride: "FS" | "GS" | null;
 
     constructor(memory: Memory) {
         this.regs = new Uint32Array(8);
@@ -33,10 +36,12 @@ export class CPU {
         this.eflags = 0;
         this.memory = memory;
         this.halted = false;
+        this.kernelStructures = null;
         this._opcodeTable = new Map();
         this._intHandler = null;
         this._exceptionHandler = null;
         this._stepCount = 0;
+        this._segmentOverride = null;
     }
 
     register(opcode: number, handler: OpcodeHandler): void {
@@ -204,12 +209,36 @@ export class CPU {
         return { isReg: false, addr };
     }
 
+    /**
+     * Apply segment override to an address if needed
+     */
+    private applySegmentOverride(addr: number): number {
+        if (!this._segmentOverride || !this.kernelStructures) {
+            return addr;
+        }
+
+        if (this._segmentOverride === "FS") {
+            return this.kernelStructures.resolveFSRelativeAddress(addr);
+        } else if (this._segmentOverride === "GS") {
+            return this.kernelStructures.resolveGSRelativeAddress(addr);
+        }
+        return addr;
+    }
+
+    /**
+     * Clear segment override after instruction execution
+     */
+    private clearSegmentOverride(): void {
+        this._segmentOverride = null;
+    }
+
     readRM32(mod: number, rm: number): number {
         const resolved = this.resolveRM(mod, rm);
         if (resolved.isReg) {
             return this.regs[resolved.addr];
         }
-        return this.memory.read32(resolved.addr);
+        const addr = this.applySegmentOverride(resolved.addr);
+        return this.memory.read32(addr);
     }
 
     writeRM32(mod: number, rm: number, val: number): void {
@@ -217,20 +246,24 @@ export class CPU {
         if (resolved.isReg) {
             this.regs[resolved.addr] = val >>> 0;
         } else {
-            this.memory.write32(resolved.addr, val >>> 0);
+            const addr = this.applySegmentOverride(resolved.addr);
+            this.memory.write32(addr, val >>> 0);
         }
     }
 
     // --- Execution ---
 
     private skipPrefix(): void {
-        // x86 prefix bytes that we skip for now
+        // x86 prefix bytes
         // 0x26 = ES:, 0x2E = CS:, 0x36 = SS:, 0x3E = DS:, 0x64 = FS:, 0x65 = GS:
         // 0x66 = Operand size override, 0x67 = Address size override
         // 0xF0 = LOCK, 0xF2 = REPNE/REPNZ, 0xF3 = REP/REPE/REPZ
         const prefixBytes = new Set([0x26, 0x2E, 0x36, 0x3E, 0x64, 0x65, 0x66, 0x67, 0xF0, 0xF2, 0xF3]);
         while (prefixBytes.has(this.memory.read8(this.eip))) {
-            this.fetch8(); // skip the prefix byte
+            const prefix = this.fetch8();
+            // Track segment overrides for memory addressing
+            if (prefix === 0x64) this._segmentOverride = "FS";
+            else if (prefix === 0x65) this._segmentOverride = "GS";
         }
     }
 
@@ -243,8 +276,10 @@ export class CPU {
                 throw new Error(`Unknown opcode: 0x${hex8(opcode)} at EIP=0x${hex32(this.eip - 1)}`);
             }
             handler(this);
+            this.clearSegmentOverride(); // Reset after instruction
             this._stepCount++;
         } catch (error: any) {
+            this.clearSegmentOverride(); // Reset even on error
             this.handleException(error);
         }
     }

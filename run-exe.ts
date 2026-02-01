@@ -1,5 +1,5 @@
 import { EXEFile } from "./index.ts";
-import { CPU, Memory, REG, registerAllOpcodes, setupExceptionDiagnostics } from "./src/emulator/index.ts";
+import { CPU, Memory, REG, registerAllOpcodes, setupExceptionDiagnostics, KernelStructures } from "./src/emulator/index.ts";
 
 const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 
@@ -45,6 +45,10 @@ console.log(`Entry point in section: ${entrySection?.name || "NOT FOUND"}`);
 // Create emulator with 512MB memory
 const mem = new Memory(512 * 1024 * 1024);
 const cpu = new CPU(mem);
+
+// Initialize kernel structures (TEB/PEB)
+const kernelStructures = new KernelStructures(mem);
+cpu.kernelStructures = kernelStructures;
 
 // Set memory so import resolver can load DLLs
 exe.importResolver.setMemory(mem);
@@ -97,8 +101,13 @@ console.log(`DEBUG: Setting EIP = imageBase(${exe.optionalHeader.imageBase}) + e
 cpu.eip = (eip >>> 0);
 
 // Stack at higher memory, but below 512MB
-cpu.regs[REG.ESP] = 0x1FF00000;
-cpu.regs[REG.EBP] = 0x1FF00000;
+const stackBase = 0x1FFFFFF0;
+const stackLimit = 0x1FF00000;
+cpu.regs[REG.ESP] = stackBase;
+cpu.regs[REG.EBP] = stackBase;
+
+// Initialize TEB/PEB with actual stack information
+kernelStructures.initializeKernelStructures(stackBase, stackLimit);
 
 console.log("\n=== Starting Emulation ===\n");
 console.log(`Initial state: ${cpu.toString()}\n`);

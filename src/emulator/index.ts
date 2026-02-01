@@ -23,6 +23,7 @@ export type { OpcodeHandler } from "../hardware/CPU.ts";
 
 // Kernel (OS integration and diagnostics)
 export { setupExceptionDiagnostics } from "../kernel/ExceptionDiagnostics.ts";
+export { KernelStructures, type TEBStructure, type PEBStructure } from "../kernel/KernelStructures.ts";
 
 // Loader (PE and DLL loading)
 export { DLLLoader, type LoadedDLL, type AddressMapping } from "../loader/DLLLoader.ts";

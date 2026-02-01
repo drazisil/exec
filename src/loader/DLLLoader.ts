@@ -92,6 +92,28 @@ export class DLLLoader {
                 memory.load(vaddr, section.data);
             }
 
+            // Apply base relocations
+            // The relocation delta is the difference between where we loaded it and where it was compiled for
+            const preferredBase = exe.optionalHeader.imageBase;
+            const relocationDelta = (baseAddress - preferredBase) >>> 0;
+
+            if (relocationDelta !== 0 && exe.baseRelocationTable) {
+                console.log(`  [Relocations] Applying delta 0x${relocationDelta.toString(16)} (loaded at 0x${baseAddress.toString(16)}, preferred 0x${preferredBase.toString(16)})`);
+                for (const block of exe.baseRelocationTable.blocks) {
+                    for (const entry of block.entries) {
+                        const relocAddr = baseAddress + block.pageRva + entry.offset;
+
+                        if (entry.type === 3) { // HIGHLOW (32-bit absolute)
+                            const currentValue = memory.read32(relocAddr);
+                            const newValue = (currentValue + relocationDelta) >>> 0;
+                            memory.write32(relocAddr, newValue);
+                        }
+                        // Type 0 (ABS) means no relocation needed
+                        // Other types are less common in 32-bit x86
+                    }
+                }
+            }
+
             // Extract exports
             const exports = new Map<string, number>();
             if (exe.exportTable) {
