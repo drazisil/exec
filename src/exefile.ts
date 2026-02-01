@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { COFFFileHeader } from "./COFFFileHeader.ts";
 import { get16, hex } from "./helpers.ts";
+import { ImportTable } from "./ImportTable.ts";
 import { OptionalHeader } from "./OptionalHeader.ts";
 import { SectionHeader } from "./SectionHeader.ts";
 
@@ -13,6 +14,7 @@ export class EXEFile {
     private _coffFileHEader: COFFFileHeader;
     private _optionalHeader: OptionalHeader;
     private _sectionHeaders: SectionHeader[];
+    private _importTable: ImportTable | null = null;
 
     constructor(filePath: string) {
         this._filePath = filePath;
@@ -40,6 +42,17 @@ export class EXEFile {
 
         for (const dd of this._optionalHeader.dataDirectories) {
             dd.resolve(this._fileImage, this._sectionHeaders);
+        }
+
+        // Parse structured import table (data directory index 1)
+        const importDir = this._optionalHeader.dataDirectories[1];
+        if (importDir && importDir.data.length > 0) {
+            this._importTable = new ImportTable(
+                importDir.data,
+                this._fileImage,
+                this._sectionHeaders,
+                this._optionalHeader.isPE32Plus,
+            );
         }
     }
 
@@ -71,6 +84,14 @@ export class EXEFile {
 
     get sectionHeaders() {
         return this._sectionHeaders;
+    }
+
+    get coffFileHeader() {
+        return this._coffFileHEader;
+    }
+
+    get importTable() {
+        return this._importTable;
     }
 
     toString() {

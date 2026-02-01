@@ -9,7 +9,8 @@ export function get16(buffer: Buffer, offset: number) {
 
 export function rvaToOffset(rva: number, sections: SectionHeader[]): number {
   for (const section of sections) {
-    if (rva >= section.virtualAddress && rva < section.virtualAddress + section.virtualSize) {
+    const effectiveSize = Math.max(section.virtualSize, section.sizeOfRawData);
+    if (rva >= section.virtualAddress && rva < section.virtualAddress + effectiveSize) {
       return section.pointerToRawData + (rva - section.virtualAddress);
     }
   }
