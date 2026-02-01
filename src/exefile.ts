@@ -12,7 +12,7 @@ import { LoadConfigDirectory } from "./LoadConfigDirectory.ts";
 import { OptionalHeader } from "./OptionalHeader.ts";
 import { SectionHeader } from "./SectionHeader.ts";
 import { TLSDirectory } from "./TLSTable.ts";
-import { ImportResolver } from "./emulator/ImportResolver.ts";
+import { ImportResolver } from "./loader/ImportResolver.ts";
 
 
 export class EXEFile {

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { EXEFile } from "../exefile.ts";
-import type { Memory } from "./Memory.ts";
+import type { Memory } from "../hardware/Memory.ts";
 
 export interface LoadedDLL {
     name: string;

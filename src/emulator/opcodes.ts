@@ -1,4 +1,4 @@
-import { CPU, REG, FLAG } from "./CPU.ts";
+import { CPU, REG, FLAG } from "../hardware/CPU.ts";
 
 export function registerAllOpcodes(cpu: CPU): void {
     registerDataMovement(cpu);
