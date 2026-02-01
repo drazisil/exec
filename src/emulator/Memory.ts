@@ -60,4 +60,29 @@ export class Memory {
     load(addr: number, data: Buffer | Uint8Array): void {
         this._bytes.set(data, addr);
     }
+
+    /**
+     * Check if an address is within valid memory bounds
+     */
+    isValidAddress(addr: number): boolean {
+        return addr >= 0 && addr < this._buffer.byteLength;
+    }
+
+    /**
+     * Check if a range of addresses is valid
+     */
+    isValidRange(addr: number, size: number): boolean {
+        return addr >= 0 && addr + size <= this._buffer.byteLength;
+    }
+
+    /**
+     * Get memory bounds
+     */
+    getBounds(): { start: number; end: number; size: number } {
+        return {
+            start: 0,
+            end: this._buffer.byteLength - 1,
+            size: this._buffer.byteLength,
+        };
+    }
 }

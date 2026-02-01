@@ -24,6 +24,7 @@ export class CPU {
     halted: boolean;
     private _opcodeTable: Map<number, OpcodeHandler>;
     private _intHandler: ((intNum: number, cpu: CPU) => void) | null;
+    private _exceptionHandler: ((error: Error, cpu: CPU) => void) | null;
     private _stepCount: number;
 
     constructor(memory: Memory) {
@@ -34,6 +35,7 @@ export class CPU {
         this.halted = false;
         this._opcodeTable = new Map();
         this._intHandler = null;
+        this._exceptionHandler = null;
         this._stepCount = 0;
     }
 
@@ -45,11 +47,23 @@ export class CPU {
         this._intHandler = handler;
     }
 
+    onException(handler: (error: Error, cpu: CPU) => void): void {
+        this._exceptionHandler = handler;
+    }
+
     triggerInterrupt(intNum: number): void {
         if (this._intHandler) {
             this._intHandler(intNum, this);
         } else {
             throw new Error(`Unhandled interrupt: INT ${hex8(intNum)}`);
+        }
+    }
+
+    handleException(error: Error): void {
+        if (this._exceptionHandler) {
+            this._exceptionHandler(error, this);
+        } else {
+            throw error;
         }
     }
 
@@ -221,14 +235,18 @@ export class CPU {
     }
 
     step(): void {
-        this.skipPrefix();
-        const opcode = this.fetch8();
-        const handler = this._opcodeTable.get(opcode);
-        if (!handler) {
-            throw new Error(`Unknown opcode: 0x${hex8(opcode)} at EIP=0x${hex32(this.eip - 1)}`);
+        try {
+            this.skipPrefix();
+            const opcode = this.fetch8();
+            const handler = this._opcodeTable.get(opcode);
+            if (!handler) {
+                throw new Error(`Unknown opcode: 0x${hex8(opcode)} at EIP=0x${hex32(this.eip - 1)}`);
+            }
+            handler(this);
+            this._stepCount++;
+        } catch (error: any) {
+            this.handleException(error);
         }
-        handler(this);
-        this._stepCount++;
     }
 
     run(maxSteps: number = 1_000_000): void {

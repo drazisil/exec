@@ -1,23 +1,27 @@
 import { ImportTable, ImportEntry } from "../ImportTable.ts";
+import { DLLLoader, type LoadedDLL } from "./DLLLoader.ts";
+import type { Memory } from "./Memory.ts";
 
 export interface ImportResolverOptions {
     dllSearchPaths: string[];
 }
 
 export class ImportResolver {
-    private _dllSearchPaths: string[];
-    // Map: iatRva => { dllName, functionName, stubAddr }
-    private _iatMap: Map<number, { dllName: string; functionName: string; stubAddr: number }>;
-    // Map: address => handler function for stubs
-    private _stubHandlers: Map<number, (cpu: any) => void>;
-    private _nextStubAddr: number;
+    private _dllLoader: DLLLoader;
+    // Map: iatRva => { dllName, functionName, realAddr }
+    private _iatMap: Map<number, { dllName: string; functionName: string; realAddr: number | null }>;
+    private _memory: Memory | null = null;
 
     constructor(options: ImportResolverOptions) {
-        this._dllSearchPaths = options.dllSearchPaths;
+        this._dllLoader = new DLLLoader(options.dllSearchPaths);
         this._iatMap = new Map();
-        this._stubHandlers = new Map();
-        // Stubs start at 0x10000000 (above typical user code)
-        this._nextStubAddr = 0x10000000;
+    }
+
+    /**
+     * Set the memory instance for loading DLLs
+     */
+    setMemory(memory: Memory): void {
+        this._memory = memory;
     }
 
     /**
@@ -25,31 +29,38 @@ export class ImportResolver {
      * This should be called before running the emulator.
      */
     buildIATMap(importTable: ImportTable | null, imageBase: number): void {
-        if (!importTable) return;
+        if (!importTable || !this._memory) return;
 
         for (const descriptor of importTable.descriptors) {
             const dllName = descriptor.dllName.toLowerCase();
+
+            // Try to load the real DLL
+            const loadedDll = this._dllLoader.loadDLL(descriptor.dllName, this._memory);
+
             for (const entry of descriptor.entries) {
-                // Create a stub address for this import
-                const stubAddr = this._nextStubAddr;
-                this._nextStubAddr += 4; // Reserve space for stub
+                let realAddr: number | null = null;
 
-                // Create a stub handler that logs/traces the call
-                // The handler is stateless and can be called from the CPU
-                this._stubHandlers.set(stubAddr, (cpu: any) => {
-                    console.log(
-                        `[IMPORT] Called ${dllName}!${entry.name} (stub 0x${stubAddr.toString(16)})`
-                    );
-                    // Return address is on stack (pushed by CALL)
-                    cpu.eip = cpu.pop32();
-                });
+                if (loadedDll) {
+                    // Try to find the exported function in the loaded DLL
+                    realAddr = loadedDll.exports.get(entry.name) || null;
+                }
 
-                // Map the IAT RVA to this stub
+                // Map the IAT RVA to the real address (or null if not found)
                 this._iatMap.set(entry.iatRva, {
                     dllName,
                     functionName: entry.name,
-                    stubAddr,
+                    realAddr,
                 });
+
+                if (realAddr) {
+                    console.log(
+                        `[ImportResolver] ${dllName}!${entry.name} => 0x${realAddr.toString(16)}`
+                    );
+                } else {
+                    console.log(
+                        `[ImportResolver] ${dllName}!${entry.name} => NOT FOUND`
+                    );
+                }
             }
         }
 
@@ -57,7 +68,7 @@ export class ImportResolver {
     }
 
     /**
-     * Write stub addresses into the IAT at the given memory address.
+     * Write real import addresses into the IAT at the given memory address.
      * This should be called after loading sections but before running.
      */
     writeIATStubs(memory: any, imageBase: number, importTable: ImportTable | null): void {
@@ -66,11 +77,15 @@ export class ImportResolver {
         for (const descriptor of importTable.descriptors) {
             for (const entry of descriptor.entries) {
                 const mapEntry = this._iatMap.get(entry.iatRva);
-                if (mapEntry) {
+                if (mapEntry && mapEntry.realAddr) {
                     const iatAddr = imageBase + entry.iatRva;
-                    memory.write32(iatAddr, mapEntry.stubAddr);
+                    memory.write32(iatAddr, mapEntry.realAddr);
                     console.log(
-                        `[ImportResolver] IAT @ 0x${iatAddr.toString(16)} => stub 0x${mapEntry.stubAddr.toString(16)}`
+                        `[ImportResolver] IAT @ 0x${iatAddr.toString(16)} => 0x${mapEntry.realAddr.toString(16)}`
+                    );
+                } else if (mapEntry) {
+                    console.log(
+                        `[ImportResolver] IAT @ 0x${(imageBase + entry.iatRva).toString(16)} => UNRESOLVED (${mapEntry.dllName}!${mapEntry.functionName})`
                     );
                 }
             }
@@ -78,32 +93,44 @@ export class ImportResolver {
     }
 
     /**
-     * Get the stub handler for a given address, if it exists.
-     */
-    getStubHandler(addr: number): ((cpu: any) => void) | undefined {
-        return this._stubHandlers.get(addr);
-    }
-
-    /**
-     * Check if an address is a stub address.
-     */
-    isStubAddress(addr: number): boolean {
-        return this._stubHandlers.has(addr);
-    }
-
-    /**
      * Get all DLL search paths.
      */
     getDllSearchPaths(): string[] {
-        return [...this._dllSearchPaths];
+        return this._dllLoader["_searchPaths"] || [];
     }
 
     /**
      * Add a DLL search path.
      */
     addDllSearchPath(path: string): void {
-        if (!this._dllSearchPaths.includes(path)) {
-            this._dllSearchPaths.push(path);
-        }
+        this._dllLoader.addSearchPath(path);
+    }
+
+    /**
+     * Get the DLL loader instance
+     */
+    getDLLLoader(): DLLLoader {
+        return this._dllLoader;
+    }
+
+    /**
+     * Find which DLL owns a given address
+     */
+    findDLLForAddress(address: number) {
+        return this._dllLoader.findDLLForAddress(address);
+    }
+
+    /**
+     * Check if an address belongs to any loaded DLL
+     */
+    isInDLLRange(address: number): boolean {
+        return this._dllLoader.isInDLLRange(address);
+    }
+
+    /**
+     * Get all address mappings
+     */
+    getAddressMappings() {
+        return this._dllLoader.getAddressMappings();
     }
 }

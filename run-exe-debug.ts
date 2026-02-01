@@ -1,5 +1,5 @@
 import { EXEFile } from "./index.ts";
-import { CPU, Memory, REG, registerAllOpcodes, setupExceptionDiagnostics } from "./src/emulator/index.ts";
+import { CPU, Memory, REG, registerAllOpcodes } from "./src/emulator/index.ts";
 
 const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 
@@ -30,19 +30,6 @@ const exe = new EXEFile(exePath, [
     "/data/Downloads/d3d8",
 ]);
 
-console.log(`Entry point RVA: 0x${exe.optionalHeader.addressOfEntryPoint.toString(16)}`);
-console.log(`Image base: 0x${exe.optionalHeader.imageBase.toString(16)}`);
-console.log(`Sections: ${exe.sectionHeaders.length}`);
-
-// Find which section contains entry point
-const entryRVA = exe.optionalHeader.addressOfEntryPoint;
-const entrySection = exe.sectionHeaders.find(s =>
-    entryRVA >= s.virtualAddress &&
-    entryRVA < s.virtualAddress + s.virtualSize
-);
-console.log(`Entry point in section: ${entrySection?.name || "NOT FOUND"}`);
-
-// Create emulator with 512MB memory
 const mem = new Memory(512 * 1024 * 1024);
 const cpu = new CPU(mem);
 
@@ -54,9 +41,6 @@ exe.importResolver.buildIATMap(exe.importTable, exe.optionalHeader.imageBase);
 
 // Register all opcodes
 registerAllOpcodes(cpu);
-
-// Set up exception diagnostics
-setupExceptionDiagnostics(cpu, exe.importResolver);
 
 // Set up interrupt handler for INT 3 (breakpoint) and INT 0x20 (DOS exit)
 cpu.onInterrupt((intNum, cpu) => {
@@ -72,44 +56,56 @@ cpu.onInterrupt((intNum, cpu) => {
 });
 
 // Load sections into memory
-console.log("\n=== Loading Sections ===");
-let totalLoaded = 0;
 for (const section of exe.sectionHeaders) {
     const vaddr = exe.optionalHeader.imageBase + section.virtualAddress;
-    console.log(`  ${section.name.padEnd(8)} @ 0x${vaddr.toString(16).padStart(8, "0")} (${section.data.byteLength} bytes)`);
     mem.load(vaddr, section.data);
-    totalLoaded += section.data.byteLength;
 }
-console.log(`Total: ${totalLoaded} bytes`);
 
 // Write IAT stubs after loading sections
 exe.importResolver.writeIATStubs(mem, exe.optionalHeader.imageBase, exe.importTable);
 
 // Set up CPU state
-// Entry point is an RVA; find its actual memory address
-if (!entrySection) {
-    throw new Error(`Entry point RVA 0x${entryRVA.toString(16)} not in any section!`);
-}
-// RVA (Relative Virtual Address) is already relative to imageBase
-// So we just add them directly
+const entryRVA = exe.optionalHeader.addressOfEntryPoint;
 const eip = exe.optionalHeader.imageBase + entryRVA;
-console.log(`DEBUG: Setting EIP = imageBase(${exe.optionalHeader.imageBase}) + entryRVA(${entryRVA}) = ${eip} (0x${(eip >>> 0).toString(16)})`);
 cpu.eip = (eip >>> 0);
 
 // Stack at higher memory, but below 512MB
 cpu.regs[REG.ESP] = 0x1FF00000;
 cpu.regs[REG.EBP] = 0x1FF00000;
 
-console.log("\n=== Starting Emulation ===\n");
-console.log(`Initial state: ${cpu.toString()}\n`);
+console.log("=== Starting Emulation (with trace) ===\n");
 
-try {
-    cpu.run(100_000);
-} catch (err: any) {
-    console.log(`\n[ERROR] ${err.message}`);
-    console.log(`State at error: ${cpu.toString()}`);
+// Manual stepping with debug output
+const maxSteps = 30;
+for (let i = 0; i < maxSteps; i++) {
+    const before = cpu.toString();
+    try {
+        cpu.step();
+        console.log(`[${i}] ${before}`);
+    } catch (err: any) {
+        console.log(`[${i}] ${before}`);
+        console.log(`\n[ERROR] ${err.message}`);
+
+        // Try to provide context about the error address if it's an access error
+        const errorMatch = err.message.match(/0x([0-9a-f]+)/i);
+        if (errorMatch) {
+            const addr = parseInt(errorMatch[1], 16);
+            const dll = exe.importResolver.findDLLForAddress(addr);
+            if (dll) {
+                console.log(`        Address 0x${addr.toString(16)} is in ${dll.name}`);
+                console.log(`        ${dll.name} range: 0x${dll.baseAddress.toString(16)}-0x${(dll.baseAddress + dll.size - 1).toString(16)}`);
+            } else {
+                console.log(`        Address 0x${addr.toString(16)} is not in any loaded DLL`);
+                console.log(`        Valid DLL ranges:`);
+                for (const mapping of exe.importResolver.getAddressMappings()) {
+                    console.log(`          0x${mapping.baseAddress.toString(16)}-0x${mapping.endAddress.toString(16)} (${mapping.dllName})`);
+                }
+            }
+        }
+        break;
+    }
 }
 
-console.log(`\n=== Emulation Complete ===`);
+console.log(`\n=== Stopped ===`);
 console.log(`Steps executed: ${cpu.stepCount}`);
 console.log(`Final state: ${cpu.toString()}`);
