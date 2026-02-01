@@ -138,7 +138,7 @@ export class DLLLoader {
         // Try each candidate DLL
         for (const candidate of bestMatch) {
             const candidateDLL = this._loadedDLLs.get(candidate.toLowerCase());
-            if (candidateDLL) {
+            if (candidateDLL && candidateDLL.exports.size > 0) {
                 const addr = candidateDLL.exports.get(functionName);
                 if (addr) {
                     return addr;
@@ -276,8 +276,14 @@ export class DLLLoader {
                         }
 
                         // If not found in the imported DLL, try API forwarding
-                        if (!importAddr && descriptor.dllName.startsWith('api-ms-win-')) {
-                            importAddr = this.findForwardedFunction(descriptor.dllName, entry.name);
+                        // Skip forwarding if current DLL is the one that might be circular
+                        const isDLLBeingLoaded = dllName.toLowerCase() === 'kernel32.dll';
+                        if (!importAddr && descriptor.dllName.startsWith('api-ms-win-') && !isDLLBeingLoaded) {
+                            const forwardedAddr = this.findForwardedFunction(descriptor.dllName, entry.name);
+                            if (forwardedAddr) {
+                                importAddr = forwardedAddr;
+                                console.log(`      [Forwarded] ${descriptor.dllName}!${entry.name} @ 0x${forwardedAddr.toString(16)}`);
+                            }
                         }
 
                         if (importAddr) {
@@ -285,7 +291,8 @@ export class DLLLoader {
                             const iatAddr = baseAddress + entry.iatRva;
                             memory.write32(iatAddr, importAddr);
                             console.log(`    [IAT] 0x${iatAddr.toString(16)} => ${descriptor.dllName}!${entry.name} @ 0x${importAddr.toString(16)}`);
-                        } else {
+                        } else if (!descriptor.dllName.startsWith('api-ms-win-')) {
+                            // Only log unresolved for non-API-forwarding DLLs (those will be resolved at runtime)
                             console.log(`    [IAT] 0x${(baseAddress + entry.iatRva).toString(16)} => ${descriptor.dllName}!${entry.name} UNRESOLVED`);
                         }
                     }
