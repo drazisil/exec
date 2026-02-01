@@ -14,6 +14,9 @@ export class Memory {
     }
 
     read8(addr: number): number {
+        if (addr < 0 || addr >= this._buffer.byteLength) {
+            throw new Error(`read8: address 0x${(addr >>> 0).toString(16)} outside bounds [0, 0x${this._buffer.byteLength.toString(16)})`);
+        }
         return this._view.getUint8(addr);
     }
 
@@ -26,10 +29,16 @@ export class Memory {
     }
 
     read32(addr: number): number {
+        if (addr < 0 || addr + 3 >= this._buffer.byteLength) {
+            throw new Error(`read32: address 0x${(addr >>> 0).toString(16)} outside bounds [0, 0x${this._buffer.byteLength.toString(16)})`);
+        }
         return this._view.getUint32(addr, true);
     }
 
     readSigned32(addr: number): number {
+        if (addr < 0 || addr + 3 >= this._buffer.byteLength) {
+            throw new Error(`readSigned32: address 0x${(addr >>> 0).toString(16)} outside bounds [0, 0x${this._buffer.byteLength.toString(16)})`);
+        }
         return this._view.getInt32(addr, true);
     }
 
@@ -42,6 +51,9 @@ export class Memory {
     }
 
     write32(addr: number, val: number): void {
+        if (addr < 0 || addr + 3 >= this._buffer.byteLength) {
+            throw new Error(`write32: address 0x${(addr >>> 0).toString(16)} outside bounds [0, 0x${this._buffer.byteLength.toString(16)})`);
+        }
         this._view.setUint32(addr, val, true);
     }
 
