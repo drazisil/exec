@@ -148,6 +148,18 @@ ${this.fieldTable(rows)}
 
     private renderDataDirectories(): string {
         const dirs = this._exe.optionalHeader.dataDirectories;
+        const structuredRenderers: Record<number, () => string | null> = {
+            0: () => this._exe.exportTable ? this.renderExportTable() : null,
+            1: () => this._exe.importTable?.descriptors.length ? this.renderImportTable() : null,
+            3: () => this._exe.exceptionTable?.entries.length ? this.renderExceptionTable() : null,
+            5: () => this._exe.baseRelocationTable?.blocks.length ? this.renderRelocationTable() : null,
+            6: () => this._exe.debugDirectory?.entries.length ? this.renderDebugDirectory() : null,
+            9: () => this._exe.tlsDirectory ? this.renderTLSDirectory() : null,
+            10: () => this._exe.loadConfigDirectory ? this.renderLoadConfig() : null,
+            11: () => this._exe.boundImportTable?.descriptors.length ? this.renderBoundImportTable() : null,
+            13: () => this._exe.delayImportTable?.descriptors.length ? this.renderDelayImportTable() : null,
+        };
+
         const inner = dirs.map((dd, i) => {
             const header = `[${String(i).padStart(2)}] ${this.esc(dd.name)} - ${hex(dd.virtualAddress)} (${hex(dd.size)} bytes)`;
             if (dd.data.length === 0) {
@@ -155,12 +167,12 @@ ${this.fieldTable(rows)}
 <summary><span class="empty">${header} - empty</span></summary>
 </details>`;
             }
-            // Structured view for Import Table (index 1)
-            if (i === 1 && this._exe.importTable && this._exe.importTable.descriptors.length > 0) {
+            const structured = structuredRenderers[i]?.();
+            if (structured) {
                 return `<details>
 <summary>${header}</summary>
 <div>
-${this.renderImportTable()}
+${structured}
 </div>
 </details>`;
             }
@@ -180,9 +192,178 @@ ${inner}
 </details>`;
     }
 
+    private renderExportTable(): string {
+        const exp = this._exe.exportTable!;
+        const header = this.fieldTable([
+            ['DLL Name', this.esc(exp.dllName)],
+            ['Ordinal Base', String(exp.ordinalBase)],
+            ['Exports', String(exp.entries.length)],
+        ]);
+        const rows = exp.entries.map(e => {
+            const name = e.name ? this.esc(e.name) : '<span class="empty">ordinal only</span>';
+            const target = e.forwarder ? `-> ${this.esc(e.forwarder)}` : hex(e.rva);
+            return `<tr><td>${e.ordinal}</td><td>${name}</td><td>${target}</td></tr>`;
+        }).join('\n');
+        return `${header}
+<table class="imports">
+<tr><th>Ordinal</th><th>Name</th><th>RVA / Forwarder</th></tr>
+${rows}
+</table>`;
+    }
+
     private renderImportTable(): string {
         const importTable = this._exe.importTable!;
         return importTable.descriptors.map(desc => {
+            const rows = desc.entries.map((entry, i) => {
+                const idx = String(i).padStart(3);
+                const rva = hex(entry.iatRva);
+                const fileOff = entry.iatFileOffset !== -1 ? hex(entry.iatFileOffset) : '—';
+                const value = hex(entry.iatValue);
+                if (entry.ordinal !== null) {
+                    return `<tr><td>${idx}</td><td>${rva}</td><td>${fileOff}</td><td>${value}</td><td>Ordinal #${entry.ordinal}</td><td></td></tr>`;
+                }
+                return `<tr><td>${idx}</td><td>${rva}</td><td>${fileOff}</td><td>${value}</td><td>${this.esc(entry.name)}</td><td>${entry.hint}</td></tr>`;
+            }).join('\n');
+
+            return `<details>
+<summary>${this.esc(desc.dllName)} <span class="dll-count">(${desc.entries.length} functions)</span></summary>
+<div>
+<table class="imports">
+<tr><th>#</th><th>IAT RVA</th><th>File Offset</th><th>Slot Value</th><th>Function</th><th>Hint</th></tr>
+${rows}
+</table>
+</div>
+</details>`;
+        }).join('\n');
+    }
+
+    private renderExceptionTable(): string {
+        const exc = this._exe.exceptionTable!;
+        const rows = exc.entries.map((e, i) => {
+            return `<tr><td>${i}</td><td>${hex(e.beginAddress)}</td><td>${hex(e.endAddress)}</td><td>${e.codeSize}</td><td>${hex(e.unwindInfoAddress)}</td></tr>`;
+        }).join('\n');
+        return `<table class="imports">
+<tr><th>#</th><th>Begin</th><th>End</th><th>Size</th><th>Unwind Info</th></tr>
+${rows}
+</table>`;
+    }
+
+    private renderRelocationTable(): string {
+        const reloc = this._exe.baseRelocationTable!;
+        const summary = this.fieldTable([
+            ['Pages', String(reloc.blocks.length)],
+            ['Total Relocations', String(reloc.totalEntries)],
+        ]);
+        const blocks = reloc.blocks.map(block => {
+            const rows = block.entries.map((e, i) => {
+                return `<tr><td>${i}</td><td>${e.typeName}</td><td>${hex(block.pageRva + e.offset)}</td><td>+${hex(e.offset, 3)}</td></tr>`;
+            }).join('\n');
+            return `<details>
+<summary>${hex(block.pageRva)} <span class="dll-count">(${block.entries.length} relocations)</span></summary>
+<div>
+<table class="imports">
+<tr><th>#</th><th>Type</th><th>Address</th><th>Offset</th></tr>
+${rows}
+</table>
+</div>
+</details>`;
+        }).join('\n');
+        return `${summary}\n${blocks}`;
+    }
+
+    private renderDebugDirectory(): string {
+        const dbg = this._exe.debugDirectory!;
+        return dbg.entries.map((e, i) => {
+            const date = new Date(e.timeDateStamp * 1000).toUTCString();
+            const rows: [string, string][] = [
+                ['Type', `${this.esc(e.typeName)} (${e.type})`],
+                ['TimeDateStamp', `${hex(e.timeDateStamp)} (${this.esc(date)})`],
+                ['Version', `${e.majorVersion}.${e.minorVersion}`],
+                ['SizeOfData', hex(e.sizeOfData)],
+                ['AddressOfRawData', hex(e.addressOfRawData)],
+                ['PointerToRawData', hex(e.pointerToRawData)],
+            ];
+            if (e.pdbPath) {
+                rows.push(['PDB Path', this.esc(e.pdbPath)]);
+                if (e.pdbGuid) rows.push(['PDB GUID', this.esc(e.pdbGuid)]);
+                if (e.pdbAge !== null) rows.push(['PDB Age', String(e.pdbAge)]);
+            }
+            return `<details>
+<summary>Entry ${i}: ${this.esc(e.typeName)}</summary>
+<div>
+${this.fieldTable(rows)}
+</div>
+</details>`;
+        }).join('\n');
+    }
+
+    private renderTLSDirectory(): string {
+        const tls = this._exe.tlsDirectory!;
+        const rows: [string, string][] = [
+            ['StartAddressOfRawData', hex(tls.startAddressOfRawData)],
+            ['EndAddressOfRawData', hex(tls.endAddressOfRawData)],
+            ['AddressOfIndex', hex(tls.addressOfIndex)],
+            ['AddressOfCallBacks', hex(tls.addressOfCallBacks)],
+            ['SizeOfZeroFill', String(tls.sizeOfZeroFill)],
+            ['Characteristics', hex(tls.characteristics)],
+        ];
+        if (tls.callbacks.length > 0) {
+            rows.push(['Callbacks', String(tls.callbacks.length)]);
+            tls.callbacks.forEach((cb, i) => rows.push([`  [${i}]`, hex(cb)]));
+        }
+        return this.fieldTable(rows);
+    }
+
+    private renderLoadConfig(): string {
+        const lc = this._exe.loadConfigDirectory!;
+        const rows: [string, string][] = [
+            ['Size', hex(lc.size)],
+            ['TimeDateStamp', hex(lc.timeDateStamp)],
+            ['Version', `${lc.majorVersion}.${lc.minorVersion}`],
+            ['GlobalFlagsClear', hex(lc.globalFlagsClear)],
+            ['GlobalFlagsSet', hex(lc.globalFlagsSet)],
+            ['CriticalSectionTimeout', String(lc.criticalSectionDefaultTimeout)],
+            ['SecurityCookie', hex(lc.securityCookie)],
+        ];
+        if (lc.seHandlerTable !== 0) {
+            rows.push(['SEHandlerTable', hex(lc.seHandlerTable)]);
+            rows.push(['SEHandlerCount', String(lc.seHandlerCount)]);
+        }
+        if (lc.guardCFCheckFunctionPointer !== 0) {
+            rows.push(['GuardCFCheckFunction', hex(lc.guardCFCheckFunctionPointer)]);
+            rows.push(['GuardCFFunctionTable', hex(lc.guardCFFunctionTable)]);
+            rows.push(['GuardCFFunctionCount', String(lc.guardCFFunctionCount)]);
+            rows.push(['GuardFlags', hex(lc.guardFlags)]);
+        }
+        return this.fieldTable(rows);
+    }
+
+    private renderBoundImportTable(): string {
+        const bound = this._exe.boundImportTable!;
+        return bound.descriptors.map(desc => {
+            const date = new Date(desc.timeDateStamp * 1000).toUTCString();
+            let html = `<details>
+<summary>${this.esc(desc.moduleName)} <span class="dll-count">(${this.esc(date)})</span></summary>
+<div>
+${this.fieldTable([['TimeDateStamp', `${hex(desc.timeDateStamp)} (${this.esc(date)})`]])}`;
+            if (desc.forwarderRefs.length > 0) {
+                const fwdRows = desc.forwarderRefs.map(f => {
+                    const fDate = new Date(f.timeDateStamp * 1000).toUTCString();
+                    return `<tr><td>${this.esc(f.moduleName)}</td><td>${hex(f.timeDateStamp)} (${this.esc(fDate)})</td></tr>`;
+                }).join('\n');
+                html += `\n<table class="imports">
+<tr><th>Forwarder</th><th>TimeDateStamp</th></tr>
+${fwdRows}
+</table>`;
+            }
+            html += '\n</div>\n</details>';
+            return html;
+        }).join('\n');
+    }
+
+    private renderDelayImportTable(): string {
+        const delay = this._exe.delayImportTable!;
+        return delay.descriptors.map(desc => {
             const rows = desc.entries.map((entry, i) => {
                 const idx = String(i).padStart(3);
                 const rva = hex(entry.iatRva);
