@@ -4,10 +4,12 @@
   "description": "Motor City Online x86 Emulator with Graphics",
   "main": "./dist/electron-main.js",
   "homepage": "./",
+  "type": "module",
   "scripts": {
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
     "build": "tsc",
+    "run": "node --experimental-strip-types run-exe.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

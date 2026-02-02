@@ -1,6 +1,7 @@
-import { ImportTable, ImportEntry } from "../ImportTable.js";
-import { DLLLoader, type LoadedDLL } from "./DLLLoader.js";
-import type { Memory } from "../hardware/Memory.js";
+import { ImportTable, ImportEntry } from "../ImportTable.ts";
+import { DLLLoader, type LoadedDLL } from "./DLLLoader.ts";
+import type { Memory } from "../hardware/Memory.ts";
+import type { Win32Stubs } from "../kernel/Win32Stubs.ts";
 
 export interface ImportResolverOptions {
     dllSearchPaths: string[];
@@ -68,28 +69,42 @@ export class ImportResolver {
     }
 
     /**
-     * Write real import addresses into the IAT at the given memory address.
+     * Write import addresses into the IAT at the given memory address.
+     * If win32Stubs is provided, stubbed functions use stub addresses instead of real DLL code.
      * This should be called after loading sections but before running.
      */
-    writeIATStubs(memory: any, imageBase: number, importTable: ImportTable | null): void {
+    writeIATStubs(memory: any, imageBase: number, importTable: ImportTable | null, win32Stubs?: Win32Stubs): void {
         if (!importTable) return;
+
+        let stubCount = 0;
+        let realCount = 0;
+        let unresolvedCount = 0;
 
         for (const descriptor of importTable.descriptors) {
             for (const entry of descriptor.entries) {
                 const mapEntry = this._iatMap.get(entry.iatRva);
-                if (mapEntry && mapEntry.realAddr) {
-                    const iatAddr = imageBase + entry.iatRva;
+                if (!mapEntry) continue;
+
+                const iatAddr = imageBase + entry.iatRva;
+
+                // Check if we have a JS stub for this function (preferred over real DLL code)
+                const stubAddr = win32Stubs?.getStubAddress(mapEntry.dllName + ".dll", mapEntry.functionName)
+                    ?? win32Stubs?.getStubAddress(mapEntry.dllName, mapEntry.functionName)
+                    ?? null;
+
+                if (stubAddr !== null) {
+                    memory.write32(iatAddr, stubAddr);
+                    stubCount++;
+                } else if (mapEntry.realAddr) {
                     memory.write32(iatAddr, mapEntry.realAddr);
-                    console.log(
-                        `[ImportResolver] IAT @ 0x${iatAddr.toString(16)} => 0x${mapEntry.realAddr.toString(16)}`
-                    );
-                } else if (mapEntry) {
-                    console.log(
-                        `[ImportResolver] IAT @ 0x${(imageBase + entry.iatRva).toString(16)} => UNRESOLVED (${mapEntry.dllName}!${mapEntry.functionName})`
-                    );
+                    realCount++;
+                } else {
+                    unresolvedCount++;
                 }
             }
         }
+
+        console.log(`[ImportResolver] IAT written: ${stubCount} stubs, ${realCount} real DLL, ${unresolvedCount} unresolved`);
     }
 
     /**

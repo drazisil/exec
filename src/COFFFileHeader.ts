@@ -1,4 +1,4 @@
-import { hex } from "./helpers.js";
+import { hex } from "./helpers.ts";
 
 export class COFFFileHeader {
   private _machine: string;

@@ -1,5 +1,5 @@
-import { EXEFile } from "./exefile.js";
-import { hex } from "./helpers.js";
+import { EXEFile } from "./exefile.ts";
+import { hex } from "./helpers.ts";
 
 const MAX_HEX_BYTES = 4096;
 

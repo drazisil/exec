@@ -1,5 +1,5 @@
-import { EXEFile } from "./index";
-import { CPU, Memory, REG, registerAllOpcodes, setupExceptionDiagnostics, KernelStructures } from "./src/emulator/index";
+import { EXEFile } from "./index.ts";
+import { CPU, Memory, REG, registerAllOpcodes, setupExceptionDiagnostics, KernelStructures, Win32Stubs, registerCRTStartupStubs, patchCRTInternals } from "./src/emulator/index.ts";
 
 const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 
@@ -43,6 +43,7 @@ const exe = new EXEFile(exePath, [
     "/data/Downloads/api-ms-win-core-synch-ansi-l1-1-0",
     "/data/Downloads/api-ms-win-core-synch-l1-1-0",
     "/data/Downloads/api-ms-win-core-synch-l1-2-0",
+    "/data/Downloads/api-ms-win-core-sysinfo-l1-1-0",
     "/data/Downloads/api-ms-win-core-sysinfo-l1-2-1",
     "/data/Downloads/api-ms-win-core-util-l1-1-0",
 ]);
@@ -77,21 +78,16 @@ exe.importResolver.buildIATMap(exe.importTable, exe.optionalHeader.imageBase);
 // Register all opcodes
 registerAllOpcodes(cpu);
 
+// Set up Win32 API stubs (must be before exception diagnostics and interrupt handlers)
+const win32Stubs = new Win32Stubs(mem);
+registerCRTStartupStubs(win32Stubs, mem);
+
 // Set up exception diagnostics
 setupExceptionDiagnostics(cpu, exe.importResolver);
 
-// Set up interrupt handler for INT 3 (breakpoint) and INT 0x20 (DOS exit)
-cpu.onInterrupt((intNum, cpu) => {
-    if (intNum === 0xCC || intNum === 0x03) {
-        console.log(`\n[BREAKPOINT] INT3 at EIP=0x${(cpu.eip >>> 0).toString(16)}`);
-        cpu.halted = true;
-    } else if (intNum === 0x20) {
-        console.log(`\n[EXIT] INT 0x20 at EIP=0x${(cpu.eip >>> 0).toString(16)}`);
-        cpu.halted = true;
-    } else {
-        throw new Error(`Unhandled interrupt INT 0x${intNum.toString(16)} at EIP=0x${(cpu.eip >>> 0).toString(16)}`);
-    }
-});
+// Install Win32 stub interrupt handler (INT 0xFE) - must be after exception diagnostics
+// since it chains to any previous interrupt handler
+win32Stubs.install(cpu);
 
 // Load sections into memory
 console.log("\n=== Loading Sections ===");
@@ -110,8 +106,11 @@ for (const section of exe.sectionHeaders) {
 }
 console.log(`Total loaded: ${totalLoaded} bytes`);
 
-// Write IAT stubs after loading sections
-exe.importResolver.writeIATStubs(mem, exe.optionalHeader.imageBase, exe.importTable);
+// Write IAT entries after loading sections (stubs override real DLL addresses)
+exe.importResolver.writeIATStubs(mem, exe.optionalHeader.imageBase, exe.importTable, win32Stubs);
+
+// Patch internal CRT functions that can't be intercepted via IAT
+patchCRTInternals(win32Stubs);
 
 // Set up CPU state
 // Entry point is an RVA; find its actual memory address
@@ -124,11 +123,12 @@ const eip = exe.optionalHeader.imageBase + entryRVA;
 console.log(`DEBUG: Setting EIP = imageBase(${exe.optionalHeader.imageBase}) + entryRVA(${entryRVA}) = ${eip} (0x${(eip >>> 0).toString(16)})`);
 cpu.eip = (eip >>> 0);
 
-// Stack at higher memory, but below 512MB
-const stackBase = 0x1FFFFFF0;
-const stackLimit = 0x1FF00000;
-cpu.regs[REG.ESP] = stackBase;
-cpu.regs[REG.EBP] = stackBase;
+// Stack at top of allocated memory
+const memSize = mem.size;
+const stackBase = memSize - 16;  // Leave some headroom
+const stackLimit = memSize - (128 * 1024);  // 128KB stack
+cpu.regs[REG.ESP] = stackBase >>> 0;
+cpu.regs[REG.EBP] = stackBase >>> 0;
 
 // Initialize TEB/PEB with actual stack information
 kernelStructures.initializeKernelStructures(stackBase, stackLimit);
@@ -137,7 +137,7 @@ console.log("\n=== Starting Emulation ===\n");
 console.log(`Initial state: ${cpu.toString()}\n`);
 
 try {
-    cpu.run(100_000);
+    cpu.run(10_000_000);
 } catch (err: any) {
     console.log(`\n[ERROR] ${err.message}`);
     console.log(`State at error: ${cpu.toString()}`);

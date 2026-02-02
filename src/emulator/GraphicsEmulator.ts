@@ -1,4 +1,4 @@
-import type { Memory } from "../hardware/Memory.js";
+import type { Memory } from "../hardware/Memory.ts";
 
 /**
  * Minimal Direct3D 8.0 emulation for Motor City Online

@@ -1,5 +1,5 @@
-import { Memory } from "./Memory.js";
-import type { KernelStructures } from "../kernel/KernelStructures.js";
+import { Memory } from "./Memory.ts";
+import type { KernelStructures } from "../kernel/KernelStructures.ts";
 
 export type OpcodeHandler = (cpu: CPU) => void;
 
@@ -29,6 +29,7 @@ export class CPU {
     private _exceptionHandler: ((error: Error, cpu: CPU) => void) | null;
     private _stepCount: number;
     private _segmentOverride: "FS" | "GS" | null;
+    private _repPrefix: "REP" | "REPNE" | null;
 
     constructor(memory: Memory) {
         this.regs = new Uint32Array(8);
@@ -42,6 +43,7 @@ export class CPU {
         this._exceptionHandler = null;
         this._stepCount = 0;
         this._segmentOverride = null;
+        this._repPrefix = null;
     }
 
     register(opcode: number, handler: OpcodeHandler): void {
@@ -189,30 +191,68 @@ export class CPU {
             if (rm === 5) {
                 addr = this.fetch32();
             } else if (rm === 4) {
-                throw new Error("SIB byte not supported in MVP");
+                addr = this.decodeSIB(mod);
             } else {
                 addr = this.regs[rm];
             }
         } else if (mod === 0b01) {
-            if (rm === 4) throw new Error("SIB byte not supported in MVP");
-            const base = this.regs[rm];
-            const disp = this.fetchSigned8();
-            addr = (base + disp) >>> 0;
+            if (rm === 4) {
+                const sibAddr = this.decodeSIB(mod);
+                const disp = this.fetchSigned8();
+                addr = (sibAddr + disp) >>> 0;
+            } else {
+                const base = this.regs[rm];
+                const disp = this.fetchSigned8();
+                addr = (base + disp) >>> 0;
+            }
         } else {
             // mod === 0b10
-            if (rm === 4) throw new Error("SIB byte not supported in MVP");
-            const base = this.regs[rm];
-            const disp = this.fetchSigned32();
-            addr = (base + disp) >>> 0;
+            if (rm === 4) {
+                const sibAddr = this.decodeSIB(mod);
+                const disp = this.fetchSigned32();
+                addr = (sibAddr + disp) >>> 0;
+            } else {
+                const base = this.regs[rm];
+                const disp = this.fetchSigned32();
+                addr = (base + disp) >>> 0;
+            }
         }
 
         return { isReg: false, addr };
     }
 
     /**
+     * Decode SIB (Scale-Index-Base) byte for complex addressing modes.
+     * Format: [base + index * scale], where scale = 1/2/4/8
+     */
+    private decodeSIB(mod: number): number {
+        const sib = this.fetch8();
+        const scale = 1 << ((sib >> 6) & 0x3); // 1, 2, 4, or 8
+        const index = (sib >> 3) & 0x7;
+        const base = sib & 0x7;
+
+        let addr = 0;
+
+        // Base register (ESP=4 special case: no index)
+        if (base === 5 && mod === 0b00) {
+            // [disp32 + index*scale] - no base register
+            addr = this.fetch32();
+        } else {
+            addr = this.regs[base];
+        }
+
+        // Index register (ESP=4 means no index)
+        if (index !== 4) {
+            addr = (addr + this.regs[index] * scale) >>> 0;
+        }
+
+        return addr;
+    }
+
+    /**
      * Apply segment override to an address if needed
      */
-    private applySegmentOverride(addr: number): number {
+    applySegmentOverride(addr: number): number {
         if (!this._segmentOverride || !this.kernelStructures) {
             return addr;
         }

@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { EXEFile } from "../exefile.js";
-import type { Memory } from "../hardware/Memory.js";
+import { EXEFile } from "../exefile.ts";
+import type { Memory } from "../hardware/Memory.ts";
 
 export interface LoadedDLL {
     name: string;
@@ -202,18 +202,6 @@ export class DLLLoader {
                 }
             }
 
-            // Workaround for KERNEL32.dll missing relocation at RVA 0x81818
-            // This address contains an RVA (0xa54f0) that needs to be converted to an absolute address
-            // The value should point to: 0x400000 (main exe base) + 0xa54f0 = 0x40a54f0
-            if (dllName.toLowerCase().includes('kernel32')) {
-                const missingRelocAddr = baseAddress + 0x81818;
-                const rvaValue = memory.read32(missingRelocAddr);
-                // Convert RVA to absolute address (assuming main exe at 0x400000)
-                const absoluteAddr = (0x400000 + rvaValue) >>> 0;
-                memory.write32(missingRelocAddr, absoluteAddr);
-                console.log(`  [Relocation Workaround] KERNEL32.dll @ 0x${missingRelocAddr.toString(16)}: RVA 0x${rvaValue.toString(16)} => Absolute 0x${absoluteAddr.toString(16)}`);
-            }
-
             // Extract exports (both named and ordinal)
             const exports = new Map<string, number>();
             if (exe.exportTable) {
@@ -269,8 +257,9 @@ export class DLLLoader {
                         }
 
                         // If not found in the imported DLL, try API forwarding for api-ms-win-* DLLs
-                        // These are system forwarding DLLs that re-export from kernel32/ntdll
+                        // These are thin forwarding wrappers - real code is in KERNELBASE/ntdll/kernel32
                         if (!importAddr && descriptor.dllName.startsWith('api-ms-win-')) {
+                            // First try the known forwarding candidates map
                             const forwardingCandidates = this.getForwardingCandidates(descriptor.dllName);
                             for (const candidate of forwardingCandidates) {
                                 const candidateDLL = this._loadedDLLs.get(candidate.toLowerCase());
@@ -278,7 +267,20 @@ export class DLLLoader {
                                     const addr = candidateDLL.exports.get(entry.name);
                                     if (addr) {
                                         importAddr = addr;
-                                        console.log(`      [Forwarded] ${descriptor.dllName}!${entry.name} => ${candidate}!${entry.name} @ 0x${addr.toString(16)}`);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // If still not found, brute-force search ALL loaded DLLs
+                            // api-ms-win-* DLLs are just forwarders - the function exists somewhere
+                            if (!importAddr) {
+                                for (const [loadedName, loadedDLL] of this._loadedDLLs) {
+                                    // Skip the current DLL being loaded and other api-ms-win-* DLLs
+                                    if (loadedName.startsWith('api-ms-win-') || loadedName === key) continue;
+                                    const addr = loadedDLL.exports.get(entry.name);
+                                    if (addr) {
+                                        importAddr = addr;
                                         break;
                                     }
                                 }
@@ -289,9 +291,7 @@ export class DLLLoader {
                             // Write the imported function address into the IAT
                             const iatAddr = baseAddress + entry.iatRva;
                             memory.write32(iatAddr, importAddr);
-                            console.log(`    [IAT] 0x${iatAddr.toString(16)} => ${descriptor.dllName}!${entry.name} @ 0x${importAddr.toString(16)}`);
-                        } else if (!descriptor.dllName.startsWith('api-ms-win-')) {
-                            // Only log unresolved for non-API-forwarding DLLs (those will be resolved at runtime)
+                        } else {
                             console.log(`    [IAT] 0x${(baseAddress + entry.iatRva).toString(16)} => ${descriptor.dllName}!${entry.name} UNRESOLVED`);
                         }
                     }

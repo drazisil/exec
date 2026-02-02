@@ -1,4 +1,4 @@
-import type { Memory } from "../hardware/Memory.js";
+import type { Memory } from "../hardware/Memory.ts";
 
 /**
  * TEB (Thread Environment Block) - x86 32-bit layout

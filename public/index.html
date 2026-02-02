@@ -320,6 +320,10 @@
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
                     break;
 
+                case 'framebuffer':
+                    drawFramebuffer(cmd);
+                    break;
+
                 case 'triangle':
                     if (cmd.vertices && cmd.vertices.length >= 3) {
                         drawTriangle(cmd.vertices[0], cmd.vertices[1], cmd.vertices[2], cmd.color);
@@ -338,6 +342,36 @@
                     }
                     break;
             }
+        }
+
+        /**
+         * Draw framebuffer from VRAM
+         */
+        function drawFramebuffer(cmd) {
+            if (!cmd.data || cmd.width === undefined || cmd.height === undefined) return;
+
+            // Create image data from framebuffer
+            const imageData = ctx.createImageData(cmd.width, cmd.height);
+            const data = imageData.data;
+
+            // Copy framebuffer data
+            for (let i = 0; i < cmd.data.length; i++) {
+                data[i] = cmd.data[i];
+            }
+
+            // Scale to fit canvas
+            const scaleX = canvas.width / cmd.width;
+            const scaleY = canvas.height / cmd.height;
+
+            // Create temporary canvas for framebuffer
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = cmd.width;
+            tempCanvas.height = cmd.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.putImageData(imageData, 0, 0);
+
+            // Draw scaled to fill canvas
+            ctx.drawImage(tempCanvas, 0, 0, cmd.width, cmd.height, 0, 0, canvas.width, canvas.height);
         }
 
         /**

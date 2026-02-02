@@ -1,18 +1,18 @@
 import { readFileSync } from "node:fs";
-import { BaseRelocationTable } from "./BaseRelocationTable.js";
-import { BoundImportTable } from "./BoundImportTable.js";
-import { COFFFileHeader } from "./COFFFileHeader.js";
-import { DebugDirectory } from "./DebugDirectory.js";
-import { DelayImportTable } from "./DelayImportTable.js";
-import { ExceptionTable } from "./ExceptionTable.js";
-import { ExportTable } from "./ExportTable.js";
-import { get16, hex } from "./helpers.js";
-import { ImportTable } from "./ImportTable.js";
-import { LoadConfigDirectory } from "./LoadConfigDirectory.js";
-import { OptionalHeader } from "./OptionalHeader.js";
-import { SectionHeader } from "./SectionHeader.js";
-import { TLSDirectory } from "./TLSTable.js";
-import { ImportResolver } from "./loader/ImportResolver.js";
+import { BaseRelocationTable } from "./BaseRelocationTable.ts";
+import { BoundImportTable } from "./BoundImportTable.ts";
+import { COFFFileHeader } from "./COFFFileHeader.ts";
+import { DebugDirectory } from "./DebugDirectory.ts";
+import { DelayImportTable } from "./DelayImportTable.ts";
+import { ExceptionTable } from "./ExceptionTable.ts";
+import { ExportTable } from "./ExportTable.ts";
+import { get16, hex } from "./helpers.ts";
+import { ImportTable } from "./ImportTable.ts";
+import { LoadConfigDirectory } from "./LoadConfigDirectory.ts";
+import { OptionalHeader } from "./OptionalHeader.ts";
+import { SectionHeader } from "./SectionHeader.ts";
+import { TLSDirectory } from "./TLSTable.ts";
+import { ImportResolver } from "./loader/ImportResolver.ts";
 
 
 export class EXEFile {

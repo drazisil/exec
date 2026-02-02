@@ -1,8 +1,9 @@
 {
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "commonjs",
-    "lib": ["ES2020", "DOM"],
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
     "outDir": "./dist",
     "rootDir": "./",
     "strict": false,
@@ -11,14 +12,14 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "declaration": true,
-    "declarationMap": true,
     "sourceMap": true,
-    "moduleResolution": "node",
-    "noEmit": false
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true
   },
   "include": [
     "electron-main.ts",
     "electron-preload.ts",
+    "run-exe.ts",
     "src/**/*.ts"
-  ],
+  ]
 }

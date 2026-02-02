@@ -1,5 +1,5 @@
-import { rvaToOffset, hex } from "./helpers.js";
-import { SectionHeader } from "./SectionHeader.js";
+import { rvaToOffset, hex } from "./helpers.ts";
+import { SectionHeader } from "./SectionHeader.ts";
 
 export class TLSDirectory {
     private _startAddressOfRawData: number;
