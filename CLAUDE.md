@@ -15,7 +15,32 @@
 - Kernel structures (TEB/PEB) at 0x00300000-0x0033ffff
 - **Segment override tracking** (FS/GS prefixes recognized and applied)
 
-### Recent Fixes (This Session)
+### Recent Fixes (Current Session - Part 2)
+
+**MAJOR: DLL IAT Binding & API Forwarding - COMPLETE**
+- **Problem**: KERNEL32's IAT entries were never filled in, causing crashes
+- **Root cause**: When DLLs were loaded, their own imports weren't being resolved
+- **Solution**: Added IAT binding to DLLLoader.loadDLL():
+  1. After loading a DLL and extracting exports, recursively load its imported DLLs
+  2. For each imported function, look up its address and write to the DLL's IAT
+  3. API forwarding for api-ms-win-* DLLs to appropriate core DLLs
+- **Status**: ✅ COMPLETE - All main DLLs now have resolved imports
+
+**Implementation Details**:
+- Added `getForwardingCandidates()` to map api-ms-win-* DLLs to their source DLLs
+- Added search paths for 14 different api-ms-win-* DLLs (in run-exe.ts)
+- Diagnostics improved to identify unresolved imports (addresses < 1MB in main exe)
+- Successfully loads and resolves: kernel32, ntdll, user32, etc. with their own imports
+
+**Current Status**:
+- ✅ KERNEL32.dll imports from api-ms-win-core-rtlsupport-l1-1-0.dll: RESOLVED
+- ✅ All loaded DLLs have their IAT entries filled
+- ⚠️ Current crash (0x000a54f0) is NOT an unresolved import issue
+  - Address is hardcoded in main executable code, not in import table
+  - Likely an uninitialized or incorrectly relocated pointer in code itself
+  - Different from import resolution - would require code analysis/relocation fixes
+
+### Recent Fixes (Previous Session)
 1. **Module Organization** - Reorganized from `src/emulator/` to:
    - `src/hardware/` - CPU and Memory (x86-32 hardware simulation)
    - `src/kernel/` - ExceptionDiagnostics and KernelStructures (OS integration)

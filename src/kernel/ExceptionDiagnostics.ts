@@ -43,6 +43,18 @@ export function setupExceptionDiagnostics(cpu: CPU, importResolver: ImportResolv
                     console.log(`  Offset in DLL: 0x${(addr - dll.baseAddress).toString(16).padStart(8, "0")}`);
                 } else {
                     console.log(`\n✗ Address is NOT in any loaded DLL`);
+
+                    // Check if this looks like an unresolved import (small value that wasn't relocated)
+                    if (addr < 0x00100000) {
+                        console.log(`\n⚠️  Address looks like an UNRESOLVED IMPORT:`);
+                        console.log(`  This is typically a value that should have been filled in from an IAT`);
+                        console.log(`  but was left as an unrelocated offset or NULL pointer`);
+                        console.log(`\n  Likely causes:`);
+                        console.log(`  1. Missing DLL - an imported DLL couldn't be found`);
+                        console.log(`  2. Missing function - a function export wasn't found in a loaded DLL`);
+                        console.log(`  3. Circular import - trying to resolve imports before dependencies are loaded`);
+                    }
+
                     console.log(`\nLoaded DLL ranges:`);
                     for (const mapping of importResolver.getAddressMappings()) {
                         console.log(`  0x${mapping.baseAddress.toString(16).padStart(8, "0")}-0x${mapping.endAddress.toString(16).padStart(8, "0")} ${mapping.dllName}`);
@@ -57,7 +69,18 @@ export function setupExceptionDiagnostics(cpu: CPU, importResolver: ImportResolv
         // Show which module we're in
         if (importResolver) {
             const currentDLL = importResolver.findDLLForAddress(cpu.eip);
-            console.log(`Location: ${currentDLL ? currentDLL.name : "Main executable"}`);
+            if (currentDLL) {
+                console.log(`Location: ${currentDLL.name}`);
+            } else {
+                console.log(`Location: Main executable`);
+                // If in main executable and address is small, likely unresolved import
+                if (cpu.eip < 0x00100000) {
+                    console.log(`\n⚠️  LIKELY UNRESOLVED IMPORT:`);
+                    console.log(`  EIP is pointing to a small address (< 1MB) in the main executable.`);
+                    console.log(`  This typically means an indirect jump/call through an IAT entry`);
+                    console.log(`  that was never filled with the actual function address.`);
+                }
+            }
         }
 
         console.log(`\nGeneral Purpose Registers:`);

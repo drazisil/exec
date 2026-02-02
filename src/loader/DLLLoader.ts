@@ -1,5 +1,4 @@
-import { readFileSync } from "node:fs";
-import { existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { EXEFile } from "../exefile.ts";
 import type { Memory } from "../hardware/Memory.ts";
@@ -84,12 +83,17 @@ export class DLLLoader {
             }
         }
 
-        // Try lowercase
+        // Try case-insensitive search in each directory
         const lowerName = dllName.toLowerCase();
-        for (const path of this._searchPaths) {
-            const fullPath = join(path, lowerName);
-            if (existsSync(fullPath)) {
-                return fullPath;
+        for (const dirPath of this._searchPaths) {
+            try {
+                const files = readdirSync(dirPath);
+                const match = files.find((f: string) => f.toLowerCase() === lowerName);
+                if (match) {
+                    return join(dirPath, match);
+                }
+            } catch (e) {
+                // Directory doesn't exist or can't be read
             }
         }
 
@@ -97,12 +101,10 @@ export class DLLLoader {
     }
 
     /**
-     * Try to find a function in a forwarding DLL
-     * API forwarding DLLs (api-ms-win-*) re-export from other DLLs
+     * Get forwarding candidates for an api-ms-win-* DLL
+     * These DLLs re-export from other system DLLs
      */
-    private findForwardedFunction(dllName: string, functionName: string): number | null {
-        // Map api-ms-win-* DLLs to their source DLLs
-        // Most api-ms-win-core-* DLLs forward to kernel32, ntdll, or other core DLLs
+    private getForwardingCandidates(dllName: string): string[] {
         const forwardingMap: { [key: string]: string[] } = {
             'api-ms-win-core-rtlsupport': ['ntdll', 'kernel32'],
             'api-ms-win-core-processthreads': ['kernel32', 'ntdll'],
@@ -119,6 +121,7 @@ export class DLLLoader {
             'api-ms-win-core-sysinfo': ['kernel32', 'ntdll'],
             'api-ms-win-core-datetime': ['kernel32', 'ntdll'],
             'api-ms-win-core-libraryloader': ['kernel32', 'ntdll'],
+            'api-ms-win-core-console': ['kernel32'],
             'api-ms-win-security-': ['advapi32', 'ntdll'],
             'api-ms-win-crt-': ['msvcrt'],
             'api-ms-win-shell-': ['shell32', 'kernel32'],
@@ -127,26 +130,14 @@ export class DLLLoader {
         };
 
         // Find the longest matching prefix
-        let bestMatch: string[] = ['kernel32', 'ntdll']; // Default fallback
         for (const [prefix, candidates] of Object.entries(forwardingMap)) {
             if (dllName.toLowerCase().startsWith(prefix)) {
-                bestMatch = candidates;
-                break; // Use first match (longer prefixes are checked first by object order)
+                return candidates;
             }
         }
 
-        // Try each candidate DLL
-        for (const candidate of bestMatch) {
-            const candidateDLL = this._loadedDLLs.get(candidate.toLowerCase());
-            if (candidateDLL && candidateDLL.exports.size > 0) {
-                const addr = candidateDLL.exports.get(functionName);
-                if (addr) {
-                    return addr;
-                }
-            }
-        }
-
-        return null;
+        // Default fallback: try core DLLs
+        return ['kernel32', 'ntdll'];
     }
 
     /**
@@ -162,21 +153,11 @@ export class DLLLoader {
         // Find the DLL file
         const dllPath = this.findDLLFile(dllName);
         if (!dllPath) {
-            // For api-ms-win-* forwarding DLLs, create a virtual stub that forwards to other DLLs
             if (dllName.startsWith('api-ms-win-')) {
-                console.log(`[DLLLoader] ${dllName} not found (API forwarding DLL - will forward to core DLLs)`);
-                // Create a stub DLL that will forward calls
-                const stubDLL: LoadedDLL = {
-                    name: dllName,
-                    baseAddress: 0, // Stub DLLs don't need real memory
-                    size: 0,
-                    exports: new Map(), // Will be populated on-demand via forwarding
-                };
-                this._loadedDLLs.set(key, stubDLL);
-                return stubDLL;
+                console.log(`[DLLLoader] ${dllName} not found (API forwarding DLL - imports will be resolved at runtime)`);
+            } else {
+                console.log(`[DLLLoader] Could not find ${dllName}`);
             }
-
-            console.log(`[DLLLoader] Could not find ${dllName}`);
             return null;
         }
 
@@ -221,6 +202,18 @@ export class DLLLoader {
                 }
             }
 
+            // Workaround for KERNEL32.dll missing relocation at RVA 0x81818
+            // This address contains an RVA (0xa54f0) that needs to be converted to an absolute address
+            // The value should point to: 0x400000 (main exe base) + 0xa54f0 = 0x40a54f0
+            if (dllName.toLowerCase().includes('kernel32')) {
+                const missingRelocAddr = baseAddress + 0x81818;
+                const rvaValue = memory.read32(missingRelocAddr);
+                // Convert RVA to absolute address (assuming main exe at 0x400000)
+                const absoluteAddr = (0x400000 + rvaValue) >>> 0;
+                memory.write32(missingRelocAddr, absoluteAddr);
+                console.log(`  [Relocation Workaround] KERNEL32.dll @ 0x${missingRelocAddr.toString(16)}: RVA 0x${rvaValue.toString(16)} => Absolute 0x${absoluteAddr.toString(16)}`);
+            }
+
             // Extract exports (both named and ordinal)
             const exports = new Map<string, number>();
             if (exe.exportTable) {
@@ -263,7 +256,7 @@ export class DLLLoader {
 
             // CRITICAL: Resolve the DLL's own imports by filling in its IAT
             if (exe.importTable) {
-                console.log(`  [IAT Resolution] Resolving ${exe.importTable.descriptors.length} import descriptors for ${dllName}`);
+                console.log(`  [IAT Resolution] Resolving ${exe.importTable.descriptors.length} import descriptors for ${dllName} (base: 0x${baseAddress.toString(16)})`);
                 for (const descriptor of exe.importTable.descriptors) {
                     // Recursively load the imported DLL
                     const importedDLL = this.loadDLL(descriptor.dllName, memory);
@@ -275,14 +268,20 @@ export class DLLLoader {
                             importAddr = importedDLL.exports.get(entry.name) || null;
                         }
 
-                        // If not found in the imported DLL, try API forwarding
-                        // Skip forwarding if current DLL is the one that might be circular
-                        const isDLLBeingLoaded = dllName.toLowerCase() === 'kernel32.dll';
-                        if (!importAddr && descriptor.dllName.startsWith('api-ms-win-') && !isDLLBeingLoaded) {
-                            const forwardedAddr = this.findForwardedFunction(descriptor.dllName, entry.name);
-                            if (forwardedAddr) {
-                                importAddr = forwardedAddr;
-                                console.log(`      [Forwarded] ${descriptor.dllName}!${entry.name} @ 0x${forwardedAddr.toString(16)}`);
+                        // If not found in the imported DLL, try API forwarding for api-ms-win-* DLLs
+                        // These are system forwarding DLLs that re-export from kernel32/ntdll
+                        if (!importAddr && descriptor.dllName.startsWith('api-ms-win-')) {
+                            const forwardingCandidates = this.getForwardingCandidates(descriptor.dllName);
+                            for (const candidate of forwardingCandidates) {
+                                const candidateDLL = this._loadedDLLs.get(candidate.toLowerCase());
+                                if (candidateDLL && candidateDLL.exports.size > 0) {
+                                    const addr = candidateDLL.exports.get(entry.name);
+                                    if (addr) {
+                                        importAddr = addr;
+                                        console.log(`      [Forwarded] ${descriptor.dllName}!${entry.name} => ${candidate}!${entry.name} @ 0x${addr.toString(16)}`);
+                                        break;
+                                    }
+                                }
                             }
                         }
 

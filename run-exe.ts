@@ -29,6 +29,22 @@ const exe = new EXEFile(exePath, [
     "/data/Downloads/version",
     "/data/Downloads/ifc22",
     "/data/Downloads/d3d8",
+    "/data/Downloads/kernelbase(1)",
+    // API forwarding DLLs (api-ms-win-*)
+    "/data/Downloads/api-ms-win-core-apiquery-l1-1-0",
+    "/data/Downloads/api-ms-win-core-console-l1-1-0",
+    "/data/Downloads/api-ms-win-core-datetime-l1-1-0",
+    "/data/Downloads/api-ms-win-core-errorhandling-l1-1-1",
+    "/data/Downloads/api-ms-win-core-namedpipe-l1-1-0",
+    "/data/Downloads/api-ms-win-core-processthreads-l1-1-0",
+    "/data/Downloads/api-ms-win-core-processthreads-l1-1-2",
+    "/data/Downloads/api-ms-win-core-profile-l1-1-0",
+    "/data/Downloads/api-ms-win-core-rtlsupport-l1-1-0",
+    "/data/Downloads/api-ms-win-core-synch-ansi-l1-1-0",
+    "/data/Downloads/api-ms-win-core-synch-l1-1-0",
+    "/data/Downloads/api-ms-win-core-synch-l1-2-0",
+    "/data/Downloads/api-ms-win-core-sysinfo-l1-2-1",
+    "/data/Downloads/api-ms-win-core-util-l1-1-0",
 ]);
 
 console.log(`Entry point RVA: 0x${exe.optionalHeader.addressOfEntryPoint.toString(16)}`);
