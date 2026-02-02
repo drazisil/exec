@@ -336,7 +336,29 @@ function registerLogic(cpu: CPU): void {
         cpu.updateFlagsLogic(result);
     });
 
-    // AND r/m32, r32
+    // OR r32, r/m8
+    cpu.register(0x0A, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const addr = cpu.resolveRM(mod, rm).addr;
+        const val1 = cpu.regs[reg];
+        const val2 = cpu.memory.read8(addr) & 0xFF;
+        const result = (val1 | val2) >>> 0;
+        cpu.regs[reg] = result;
+        cpu.updateFlagsLogic(result);
+    });
+
+    // AND r/m8, r8
+    cpu.register(0x20, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const addr = cpu.resolveRM(mod, rm).addr;
+        const val1 = cpu.memory.read8(addr);
+        const val2 = cpu.regs[reg] & 0xFF;
+        const result = (val1 & val2) & 0xFF;
+        cpu.memory.write8(addr, result);
+        cpu.updateFlagsLogic(result);
+    });
+
+    // AND r32, r/m32
     cpu.register(0x21, (cpu) => {
         const { mod, reg, rm } = cpu.decodeModRM();
         const result = (cpu.readRM32(mod, rm) & cpu.regs[reg]) >>> 0;
@@ -397,6 +419,14 @@ function registerLogic(cpu: CPU): void {
         const imm = cpu.fetch32();
         const result = (cpu.regs[REG.EAX] + imm) >>> 0;
         cpu.updateFlagsArith(cpu.regs[REG.EAX] + imm, cpu.regs[REG.EAX], imm, false);
+        cpu.regs[REG.EAX] = result;
+    });
+
+    // 0x0C: AND EAX, imm8 (zero-extended to 32-bit)
+    cpu.register(0x0C, (cpu) => {
+        const imm = cpu.fetch8();
+        const result = (cpu.regs[REG.EAX] & imm) >>> 0;
+        cpu.updateFlagsLogic(result);
         cpu.regs[REG.EAX] = result;
     });
 

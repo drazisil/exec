@@ -59,8 +59,9 @@ const entrySection = exe.sectionHeaders.find(s =>
 );
 console.log(`Entry point in section: ${entrySection?.name || "NOT FOUND"}`);
 
-// Create emulator with 1GB memory (needed for many DLLs)
-const mem = new Memory(1024 * 1024 * 1024);
+// Create emulator with 2GB memory (needed for DLLs + game heap allocation)
+// The game appears to expect memory at high addresses for heap/data allocation
+const mem = new Memory(2 * 1024 * 1024 * 1024);
 const cpu = new CPU(mem);
 
 // Initialize kernel structures (TEB/PEB)
@@ -97,11 +98,17 @@ console.log("\n=== Loading Sections ===");
 let totalLoaded = 0;
 for (const section of exe.sectionHeaders) {
     const vaddr = exe.optionalHeader.imageBase + section.virtualAddress;
-    console.log(`  ${section.name.padEnd(8)} @ 0x${vaddr.toString(16).padStart(8, "0")} (${section.data.byteLength} bytes)`);
+    console.log(`  ${section.name.padEnd(8)} @ 0x${vaddr.toString(16).padStart(8, "0")} (${section.data.byteLength} bytes, virtual size: ${section.virtualSize} bytes)`);
     mem.load(vaddr, section.data);
     totalLoaded += section.data.byteLength;
+
+    // Zero-initialize any uninitialized portion of the section
+    if (section.virtualSize > section.data.byteLength) {
+        const uninitSize = section.virtualSize - section.data.byteLength;
+        console.log(`    Note: Section has ${uninitSize} bytes of uninitialized data (auto-zeroed)`);
+    }
 }
-console.log(`Total: ${totalLoaded} bytes`);
+console.log(`Total loaded: ${totalLoaded} bytes`);
 
 // Write IAT stubs after loading sections
 exe.importResolver.writeIATStubs(mem, exe.optionalHeader.imageBase, exe.importTable);

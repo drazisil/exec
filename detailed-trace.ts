@@ -29,7 +29,7 @@ const exe = new EXEFile(exePath, [
     "/data/Downloads/d3d8",
 ]);
 
-const mem = new Memory(1024 * 1024 * 1024);
+const mem = new Memory(2 * 1024 * 1024 * 1024);
 const cpu = new CPU(mem);
 const kernelStructures = new KernelStructures(mem);
 
