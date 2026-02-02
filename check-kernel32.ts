@@ -1,6 +1,6 @@
-import { EXEFile } from "./index.ts";
-import { DLLLoader } from "./src/loader/DLLLoader.ts";
-import { Memory } from "./src/hardware/Memory.ts";
+import { EXEFile } from "./index";
+import { DLLLoader } from "./src/loader/DLLLoader";
+import { Memory } from "./src/hardware/Memory";
 
 const mem = new Memory(1024 * 1024 * 1024);
 const loader = new DLLLoader(["/data/Downloads/kernel32"]);

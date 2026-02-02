@@ -1,4 +1,4 @@
-import { EXEFile } from "./index.ts";
+import { EXEFile } from "./index";
 
 const dllPath = "/data/Downloads/kernel32/kernel32.dll";
 const exe = new EXEFile(dllPath);

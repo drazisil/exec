@@ -1,4 +1,4 @@
-import { CPU, REG, FLAG } from "../hardware/CPU.ts";
+import { CPU, REG, FLAG } from "../hardware/CPU.js";
 
 export function registerAllOpcodes(cpu: CPU): void {
     registerDataMovement(cpu);
@@ -248,7 +248,7 @@ function doGroup2(cpu: CPU, mod: number, rm: number, opExt: number, val: number,
             // OF set if bit 31 changed
             if (count === 1) {
                 const msb = (result & 0x80000000) !== 0;
-                const ofVal = msb !== ((result >>> 1) & 0x40000000);
+                const ofVal = msb !== (((result >>> 1) & 0x40000000) !== 0);
                 cpu.setFlag(FLAG.OF, ofVal);
             }
             break;
@@ -261,7 +261,7 @@ function doGroup2(cpu: CPU, mod: number, rm: number, opExt: number, val: number,
             // OF set if bit 31 changed
             if (count === 1) {
                 const msb = (result & 0x80000000) !== 0;
-                const ofVal = msb !== ((val >>> 31) & 1);
+                const ofVal = msb !== (((val >>> 31) & 1) !== 0);
                 cpu.setFlag(FLAG.OF, ofVal);
             }
             break;

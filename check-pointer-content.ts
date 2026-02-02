@@ -18,7 +18,7 @@ console.log("  Full address = 0x400000 + 0xa54f0 = 0x40a54f0");
 console.log("");
 console.log("Is 0xa54f0 a valid RVA in MCity_d.exe?");
 
-import { EXEFile } from "./index.ts";
+import { EXEFile } from "./index";
 
 const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 const exe = new EXEFile(exePath, []);

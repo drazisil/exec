@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Motor City Online - Emulator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #header {
+            background: linear-gradient(135deg, #1a1f3a 0%, #2d3561 100%);
+            padding: 10px 20px;
+            border-bottom: 2px solid #4a90e2;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        #title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #4a90e2;
+        }
+
+        #controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 8px 16px;
+            background: #4a90e2;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #357abd;
+        }
+
+        button:active {
+            transform: scale(0.95);
+        }
+
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        #container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            gap: 1px;
+            background: #000;
+        }
+
+        #canvasContainer {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            position: relative;
+        }
+
+        #canvas {
+            display: block;
+            max-width: 100%;
+            max-height: 100%;
+            background: #1a1a2e;
+        }
+
+        #sidebar {
+            width: 320px;
+            background: #1a1f3a;
+            border-left: 2px solid #4a90e2;
+            overflow-y: auto;
+            padding: 15px;
+            font-size: 12px;
+        }
+
+        .stat-group {
+            margin-bottom: 20px;
+            padding: 12px;
+            background: #2d3561;
+            border-radius: 4px;
+            border-left: 3px solid #4a90e2;
+        }
+
+        .stat-group h3 {
+            color: #4a90e2;
+            margin-bottom: 8px;
+            font-size: 13px;
+            text-transform: uppercase;
+        }
+
+        .stat {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            padding: 4px 0;
+            border-bottom: 1px solid #1a1f3a;
+        }
+
+        .stat:last-child {
+            border-bottom: none;
+        }
+
+        .stat-label {
+            color: #a0a0a0;
+        }
+
+        .stat-value {
+            color: #4a90e2;
+            font-weight: bold;
+            font-family: 'Courier New', monospace;
+        }
+
+        #status {
+            padding: 8px 12px;
+            background: #1a1f3a;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            border: 1px solid #4a90e2;
+            color: #4a90e2;
+            text-align: center;
+        }
+
+        #status.running {
+            background: #2d5a2d;
+            border-color: #4ade80;
+            color: #4ade80;
+        }
+
+        #status.paused {
+            background: #5a4a2d;
+            border-color: #fbbf24;
+            color: #fbbf24;
+        }
+
+        #status.error {
+            background: #5a2d2d;
+            border-color: #f87171;
+            color: #f87171;
+        }
+
+        .log-area {
+            background: #0a0e27;
+            border: 1px solid #2d3561;
+            border-radius: 4px;
+            padding: 8px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            margin-top: 10px;
+        }
+
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .log-entry.info {
+            color: #a0a0a0;
+        }
+
+        .log-entry.warn {
+            color: #fbbf24;
+        }
+
+        .log-entry.error {
+            color: #f87171;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1a1f3a;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #4a90e2;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #357abd;
+        }
+    </style>
+</head>
+<body>
+    <div id="header">
+        <div id="title">🎮 Motor City Online - x86 Emulator</div>
+        <div id="controls">
+            <button id="pauseBtn" onclick="togglePause()">⏸ Pause</button>
+            <button id="stepBtn" onclick="stepEmulator()" disabled>⏩ Step</button>
+            <button id="resetBtn" onclick="resetEmulator()">🔄 Reset</button>
+            <button id="screenshotBtn" onclick="takeScreenshot()">📸 Screenshot</button>
+        </div>
+    </div>
+
+    <div id="container">
+        <div id="canvasContainer">
+            <canvas id="canvas"></canvas>
+        </div>
+
+        <div id="sidebar">
+            <div id="status" class="running">Running</div>
+
+            <div class="stat-group">
+                <h3>📊 Performance</h3>
+                <div class="stat">
+                    <span class="stat-label">FPS:</span>
+                    <span class="stat-value" id="fps">60</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Frame Time:</span>
+                    <span class="stat-value" id="frameTime">16.7ms</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Draw Calls:</span>
+                    <span class="stat-value" id="drawCalls">0</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Triangles:</span>
+                    <span class="stat-value" id="triangles">0</span>
+                </div>
+            </div>
+
+            <div class="stat-group">
+                <h3>🔧 Emulator</h3>
+                <div class="stat">
+                    <span class="stat-label">Instructions:</span>
+                    <span class="stat-value" id="instructions">0</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Current EIP:</span>
+                    <span class="stat-value" id="eip">0x00000000</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Memory Used:</span>
+                    <span class="stat-value" id="memory">0 MB</span>
+                </div>
+            </div>
+
+            <div class="stat-group">
+                <h3>📝 Log</h3>
+                <div class="log-area" id="logArea"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global state
+        let isPaused = false;
+
+        // Get canvas and context
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // Set canvas size to container
+        function resizeCanvas() {
+            const container = document.getElementById('canvasContainer');
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Listen for draw commands from emulator
+        window.emulatorAPI.onDrawCommand((cmd) => {
+            handleDrawCommand(cmd);
+        });
+
+        // Listen for status updates
+        window.emulatorAPI.onStatus((status) => {
+            updateStatus(status);
+        });
+
+        // Listen for statistics
+        window.emulatorAPI.onStats((stats) => {
+            updateStats(stats);
+        });
+
+        /**
+         * Handle draw commands
+         */
+        function handleDrawCommand(cmd) {
+            switch (cmd.type) {
+                case 'clear':
+                    ctx.fillStyle = `rgb(${cmd.clear[0]}, ${cmd.clear[1]}, ${cmd.clear[2]})`;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    break;
+
+                case 'triangle':
+                    if (cmd.vertices && cmd.vertices.length >= 3) {
+                        drawTriangle(cmd.vertices[0], cmd.vertices[1], cmd.vertices[2], cmd.color);
+                    }
+                    break;
+
+                case 'line':
+                    if (cmd.vertices && cmd.vertices.length >= 2) {
+                        drawLine(cmd.vertices[0], cmd.vertices[1], cmd.color);
+                    }
+                    break;
+
+                case 'sprite':
+                    if (cmd.x !== undefined && cmd.y !== undefined) {
+                        drawSprite(cmd.x, cmd.y, cmd.color);
+                    }
+                    break;
+            }
+        }
+
+        /**
+         * Project 3D to 2D
+         */
+        function project3D(point) {
+            if (point.length < 3) return [0, 0];
+
+            const [x, y, z] = point;
+            const fov = 75;
+            const aspect = canvas.width / canvas.height;
+            const scale = 1 / Math.tan((fov / 2) * (Math.PI / 180));
+
+            const projX = (x * scale / z) * (canvas.width / 2) + canvas.width / 2;
+            const projY = canvas.height / 2 - (y * scale / aspect / z) * (canvas.height / 2);
+
+            return [projX, projY];
+        }
+
+        /**
+         * Draw triangle
+         */
+        function drawTriangle(p1, p2, p3, color) {
+            const [x1, y1] = project3D(p1);
+            const [x2, y2] = project3D(p2);
+            const [x3, y3] = project3D(p3);
+
+            ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.lineTo(x3, y3);
+            ctx.closePath();
+            ctx.fill();
+
+            // Outline
+            ctx.strokeStyle = `rgba(255, 255, 255, 0.3)`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+        }
+
+        /**
+         * Draw line
+         */
+        function drawLine(p1, p2, color) {
+            const [x1, y1] = project3D(p1);
+            const [x2, y2] = project3D(p2);
+
+            ctx.strokeStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+        }
+
+        /**
+         * Draw sprite (2D)
+         */
+        function drawSprite(x, y, color) {
+            ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+            ctx.fillRect(x - 2, y - 2, 4, 4);
+        }
+
+        /**
+         * Update status
+         */
+        function updateStatus(status) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = status;
+            statusEl.className = status.toLowerCase();
+        }
+
+        /**
+         * Update statistics
+         */
+        function updateStats(stats) {
+            document.getElementById('fps').textContent = Math.round(stats.fps);
+            document.getElementById('frameTime').textContent = (1000 / stats.fps).toFixed(1) + 'ms';
+            document.getElementById('drawCalls').textContent = stats.drawCalls;
+            document.getElementById('triangles').textContent = stats.triangles;
+            document.getElementById('instructions').textContent = stats.instructionsExecuted.toLocaleString();
+            document.getElementById('eip').textContent = stats.currentEIP;
+        }
+
+        /**
+         * Controls
+         */
+        function togglePause() {
+            isPaused = !isPaused;
+            const btn = document.getElementById('pauseBtn');
+            const stepBtn = document.getElementById('stepBtn');
+
+            if (isPaused) {
+                window.emulatorAPI.pauseEmulator();
+                btn.textContent = '▶ Resume';
+                stepBtn.disabled = false;
+            } else {
+                window.emulatorAPI.resumeEmulator();
+                btn.textContent = '⏸ Pause';
+                stepBtn.disabled = true;
+            }
+        }
+
+        function stepEmulator() {
+            window.emulatorAPI.stepEmulator();
+        }
+
+        function resetEmulator() {
+            if (confirm('Reset emulator?')) {
+                window.emulatorAPI.resetEmulator();
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+        }
+
+        function takeScreenshot() {
+            window.emulatorAPI.saveCanvas(canvas, 'screenshot.png');
+        }
+
+        // Log helper
+        function log(message, type = 'info') {
+            const logArea = document.getElementById('logArea');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = message;
+            logArea.appendChild(entry);
+            logArea.scrollTop = logArea.scrollHeight;
+
+            // Keep only last 100 entries
+            while (logArea.children.length > 100) {
+                logArea.removeChild(logArea.firstChild);
+            }
+        }
+
+        log('Emulator started', 'info');
+    </script>
+</body>
+</html>

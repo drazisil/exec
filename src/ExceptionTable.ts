@@ -1,4 +1,4 @@
-import { hex } from "./helpers.ts";
+import { hex } from "./helpers.js";
 
 export class RuntimeFunction {
     private _beginAddress: number;

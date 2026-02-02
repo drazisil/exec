@@ -1,4 +1,4 @@
-import { EXEFile } from "./index.ts";
+import { EXEFile } from "./index";
 
 const kernel32 = new EXEFile("/data/Downloads/kernel32/kernel32.dll");
 

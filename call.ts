@@ -1,4 +1,4 @@
-import { EXEFile, HTMLRenderer } from "./index.ts";
+import { EXEFile, HTMLRenderer } from "./index";
 
 const FILE_PATH = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 

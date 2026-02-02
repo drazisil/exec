@@ -1,6 +1,6 @@
-import { rvaToOffset, hex } from "./helpers.ts";
-import { SectionHeader } from "./SectionHeader.ts";
-import { ImportEntry } from "./ImportTable.ts";
+import { rvaToOffset, hex } from "./helpers.js";
+import { SectionHeader } from "./SectionHeader.js";
+import { ImportEntry } from "./ImportTable.js";
 
 export class DelayImportDescriptor {
     private _attributes: number;

@@ -1,4 +1,4 @@
-import { SectionHeader } from "./SectionHeader.ts";
+import { SectionHeader } from "./SectionHeader.js";
 
 
 export function get16(buffer: Buffer, offset: number) {

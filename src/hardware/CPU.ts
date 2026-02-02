@@ -1,5 +1,5 @@
-import { Memory } from "./Memory.ts";
-import type { KernelStructures } from "../kernel/KernelStructures.ts";
+import { Memory } from "./Memory.js";
+import type { KernelStructures } from "../kernel/KernelStructures.js";
 
 export type OpcodeHandler = (cpu: CPU) => void;
 

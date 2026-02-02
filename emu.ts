@@ -1,4 +1,4 @@
-import { CPU, Memory, REG, REG_NAMES, registerAllOpcodes } from "./src/emulator/index.ts";
+import { CPU, Memory, REG, REG_NAMES, registerAllOpcodes } from "./src/emulator/index";
 
 // Hand-assembled test program:
 //

@@ -1,5 +1,5 @@
-import { EXEFile } from "./index.ts";
-import { Memory } from "./src/hardware/Memory.ts";
+import { EXEFile } from "./index";
+import { Memory } from "./src/hardware/Memory";
 
 const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 const exe = new EXEFile(exePath, ["/home/drazisil/mco-source/MCity"]);

@@ -1,4 +1,4 @@
-import { EXEFile } from "./index.ts";
+import { EXEFile } from "./index";
 
 const exe = new EXEFile("/home/drazisil/mco-source/MCity/MCity_d.exe");
 

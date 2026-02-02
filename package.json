@@ -1,18 +1,27 @@
 {
   "name": "exe",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Motor City Online x86 Emulator with Graphics",
+  "main": "./dist/electron-main.js",
+  "homepage": "./",
   "scripts": {
-    "start": "node call.ts",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron .",
+    "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "emulator",
+    "x86",
+    "motor-city-online"
+  ],
   "author": "",
   "license": "ISC",
-  "type": "module",
   "devDependencies": {
     "@types/node": "25.1.0",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "electron": "^31.0.0"
+  },
+  "dependencies": {
   }
 }

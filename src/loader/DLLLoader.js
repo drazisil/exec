@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { EXEFile } from "../exefile.ts";
+import { EXEFile } from "../exefile.js";
 export class DLLLoader {
     constructor(searchPaths = []) {
         this._loadedDLLs = new Map();

@@ -1,5 +1,5 @@
-import { EXEFile } from "./index.ts";
-import { Memory } from "./src/hardware/Memory.ts";
+import { EXEFile } from "./index";
+import { Memory } from "./src/hardware/Memory";
 
 const dllPath = "/data/Downloads/kernel32/kernel32.dll";
 const kernel32 = new EXEFile(dllPath);

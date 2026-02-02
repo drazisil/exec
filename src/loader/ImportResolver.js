@@ -1,4 +1,4 @@
-import { DLLLoader } from "./DLLLoader.ts";
+import { DLLLoader } from "./DLLLoader.js";
 export class ImportResolver {
     constructor(options) {
         this._memory = null;

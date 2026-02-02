@@ -1,6 +1,6 @@
-import { ImportTable, ImportEntry } from "../ImportTable.ts";
-import { DLLLoader, type LoadedDLL } from "./DLLLoader.ts";
-import type { Memory } from "../hardware/Memory.ts";
+import { ImportTable, ImportEntry } from "../ImportTable.js";
+import { DLLLoader, type LoadedDLL } from "./DLLLoader.js";
+import type { Memory } from "../hardware/Memory.js";
 
 export interface ImportResolverOptions {
     dllSearchPaths: string[];

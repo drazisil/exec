@@ -1,6 +1,6 @@
-import type { CPU } from "../hardware/CPU.ts";
-import type { ImportResolver } from "../loader/ImportResolver.ts";
-import { REG, REG_NAMES } from "../hardware/CPU.ts";
+import type { CPU } from "../hardware/CPU.js";
+import type { ImportResolver } from "../loader/ImportResolver.js";
+import { REG, REG_NAMES } from "../hardware/CPU.js";
 
 export function setupExceptionDiagnostics(cpu: CPU, importResolver: ImportResolver | null): void {
     cpu.onException((error: Error, cpu: CPU) => {

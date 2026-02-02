@@ -1,5 +1,5 @@
-import { rvaToOffset, hex } from "./helpers.ts";
-import { SectionHeader } from "./SectionHeader.ts";
+import { rvaToOffset, hex } from "./helpers.js";
+import { SectionHeader } from "./SectionHeader.js";
 
 export class DataDirectory {
   private _virtualAddress: number;

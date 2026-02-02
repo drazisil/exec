@@ -1,4 +1,4 @@
-import { EXEFile } from "./index.ts";
+import { EXEFile } from "./index";
 
 const ntdll = new EXEFile("/data/Downloads/ntdll/ntdll.dll");
 

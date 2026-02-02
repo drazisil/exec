@@ -1,5 +1,5 @@
-import { DataDirectory } from "./DataDirectory.ts";
-import { hex } from "./helpers.ts";
+import { DataDirectory } from "./DataDirectory.js";
+import { hex } from "./helpers.js";
 
 export class OptionalHeader {
   // Standard fields

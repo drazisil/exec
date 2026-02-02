@@ -1,4 +1,4 @@
-import { hex } from "./helpers.ts";
+import { hex } from "./helpers.js";
 
 const DebugTypeNames: Record<number, string> = {
     0: 'UNKNOWN',

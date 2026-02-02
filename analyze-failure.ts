@@ -1,5 +1,5 @@
-import { EXEFile } from "./index.ts";
-import { CPU, Memory, REG, registerAllOpcodes } from "./src/emulator/index.ts";
+import { EXEFile } from "./index";
+import { CPU, Memory, REG, registerAllOpcodes } from "./src/emulator/index";
 
 const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
 
