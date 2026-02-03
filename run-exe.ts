@@ -136,11 +136,19 @@ kernelStructures.initializeKernelStructures(stackBase, stackLimit);
 console.log("\n=== Starting Emulation ===\n");
 console.log(`Initial state: ${cpu.toString()}\n`);
 
+cpu.enableTrace(30);
+
 try {
     cpu.run(10_000_000);
 } catch (err: any) {
     console.log(`\n[ERROR] ${err.message}`);
     console.log(`State at error: ${cpu.toString()}`);
+}
+
+// Dump trace on halt/error
+console.log(`\n--- Instruction Trace (last 20) ---`);
+for (const line of cpu.dumpTrace()) {
+    console.log(`  ${line}`);
 }
 
 console.log(`\n=== Emulation Complete ===`);

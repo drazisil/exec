@@ -14,6 +14,7 @@ export const FLAG = {
     CF: 0,
     ZF: 6,
     SF: 7,
+    DF: 10,
     OF: 11,
 } as const;
 
@@ -266,10 +267,11 @@ export class CPU {
     }
 
     /**
-     * Clear segment override after instruction execution
+     * Clear prefixes after instruction execution
      */
-    private clearSegmentOverride(): void {
+    private clearPrefixes(): void {
         this._segmentOverride = null;
+        this._repPrefix = null;
     }
 
     readRM32(mod: number, rm: number): number {
@@ -293,6 +295,10 @@ export class CPU {
 
     // --- Execution ---
 
+    get repPrefix(): "REP" | "REPNE" | null {
+        return this._repPrefix;
+    }
+
     private skipPrefix(): void {
         // x86 prefix bytes
         // 0x26 = ES:, 0x2E = CS:, 0x36 = SS:, 0x3E = DS:, 0x64 = FS:, 0x65 = GS:
@@ -304,22 +310,48 @@ export class CPU {
             // Track segment overrides for memory addressing
             if (prefix === 0x64) this._segmentOverride = "FS";
             else if (prefix === 0x65) this._segmentOverride = "GS";
+            // Track REP/REPNE prefixes for string instructions
+            else if (prefix === 0xF3) this._repPrefix = "REP";
+            else if (prefix === 0xF2) this._repPrefix = "REPNE";
         }
+    }
+
+    // Circular trace buffer for debugging - stores last N instructions
+    private _traceBuffer: string[] = [];
+    private _traceEnabled: boolean = false;
+    private _traceSize: number = 20;
+
+    enableTrace(size: number = 20): void {
+        this._traceEnabled = true;
+        this._traceSize = size;
+        this._traceBuffer = [];
+    }
+
+    dumpTrace(): string[] {
+        return [...this._traceBuffer];
     }
 
     step(): void {
         try {
             this.skipPrefix();
+            const instrAddr = this.eip;
             const opcode = this.fetch8();
+            if (this._traceEnabled) {
+                const entry = `[${this._stepCount}] EIP=0x${hex32(instrAddr)} op=0x${hex8(opcode)} ESP=0x${hex32(this.regs[REG.ESP])} EBP=0x${hex32(this.regs[REG.EBP])} EAX=0x${hex32(this.regs[REG.EAX])}`;
+                this._traceBuffer.push(entry);
+                if (this._traceBuffer.length > this._traceSize) {
+                    this._traceBuffer.shift();
+                }
+            }
             const handler = this._opcodeTable.get(opcode);
             if (!handler) {
                 throw new Error(`Unknown opcode: 0x${hex8(opcode)} at EIP=0x${hex32(this.eip - 1)}`);
             }
             handler(this);
-            this.clearSegmentOverride(); // Reset after instruction
+            this.clearPrefixes(); // Reset after instruction
             this._stepCount++;
         } catch (error: any) {
-            this.clearSegmentOverride(); // Reset even on error
+            this.clearPrefixes(); // Reset even on error
             this.handleException(error);
         }
     }
