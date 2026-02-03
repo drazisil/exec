@@ -4,7 +4,7 @@
 
 ```bash
 # Native node TS execution (PREFERRED - no build step needed):
-node --experimental-transform-types run-exe.ts
+node run-exe.ts
 
 # Or via npm script:
 npm run run
@@ -166,10 +166,10 @@ thread-local data.
 
 ```bash
 # Run with full output:
-node --experimental-transform-types run-exe.ts
+node run-exe.ts
 
 # Quick test (5 second timeout):
-timeout 5 node --experimental-transform-types run-exe.ts 2>&1 | tail -30
+timeout 5 node run-exe.ts 2>&1 | tail -30
 
 # Build for electron:
 npm run build
