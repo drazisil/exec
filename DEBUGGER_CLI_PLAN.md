@@ -6,17 +6,17 @@ This document provides step-by-step instructions to consolidate the 50+ ad-hoc d
 
 Replace this:
 ```bash
-node --experimental-transform-types scripts/trace-crash.ts
-node --experimental-transform-types scripts/memory-map.ts
-node --experimental-transform-types scripts/identify-crash-module.ts
+node scripts/trace-crash.ts
+node scripts/memory-map.ts
+node scripts/identify-crash-module.ts
 # ... 50 more scripts with duplicated boilerplate
 ```
 
 With this:
 ```bash
-node --experimental-transform-types dbg.ts trace 1000
-node --experimental-transform-types dbg.ts map
-node --experimental-transform-types dbg.ts module 0x004a54f6
+node dbg.ts trace 1000
+node dbg.ts map
+node dbg.ts module 0x004a54f6
 ```
 
 ---
@@ -653,7 +653,7 @@ import * as commands from "./commands/index.ts";
 
 function printUsage(): void {
   console.log(`
-Usage: node --experimental-transform-types dbg.ts <command> [options]
+Usage: node dbg.ts <command> [options]
 
 Commands:
   trace [steps]           Run N steps (default: 1000)
@@ -787,7 +787,7 @@ Add to `package.json` in the `"scripts"` section:
 ```json
 {
   "scripts": {
-    "dbg": "node --experimental-transform-types dbg.ts"
+    "dbg": "node dbg.ts"
   }
 }
 ```
