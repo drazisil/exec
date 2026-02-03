@@ -2,6 +2,7 @@ import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { EXEFile } from "../exefile.ts";
 import type { Memory } from "../hardware/Memory.ts";
+import type { Win32Stubs } from "../kernel/Win32Stubs.ts";
 
 export interface LoadedDLL {
     name: string;
@@ -16,10 +17,19 @@ export interface AddressMapping {
     endAddress: number;
 }
 
+/** Tracks an IAT entry written during DLL loading so we can re-patch with stubs later */
+interface DLLIATEntry {
+    iatAddr: number;         // absolute address in memory where the IAT pointer lives
+    dllName: string;         // the DLL that imports this function
+    importedDllName: string; // the DLL being imported from (e.g. "kernel32.dll")
+    funcName: string;        // the function name (e.g. "TlsSetValue")
+}
+
 export class DLLLoader {
     private _searchPaths: string[];
     private _loadedDLLs: Map<string, LoadedDLL> = new Map();
     private _addressMappings: AddressMapping[] = []; // Sorted list of address ranges
+    private _dllIATEntries: DLLIATEntry[] = []; // Track all DLL IAT writes for later stub patching
     private _dllSize: number = 0x01000000; // Each DLL gets 16MB of address space
     private _maxAddress: number = 0x40000000; // Max addressable (1GB)
 
@@ -291,6 +301,13 @@ export class DLLLoader {
                             // Write the imported function address into the IAT
                             const iatAddr = baseAddress + entry.iatRva;
                             memory.write32(iatAddr, importAddr);
+                            // Track this IAT entry so we can re-patch with stubs later
+                            this._dllIATEntries.push({
+                                iatAddr,
+                                dllName: key,
+                                importedDllName: descriptor.dllName.toLowerCase(),
+                                funcName: entry.name,
+                            });
                         } else {
                             console.log(`    [IAT] 0x${(baseAddress + entry.iatRva).toString(16)} => ${descriptor.dllName}!${entry.name} UNRESOLVED`);
                         }
@@ -307,6 +324,32 @@ export class DLLLoader {
             }
             return null;
         }
+    }
+
+    /**
+     * Re-patch all loaded DLLs' IAT entries to use Win32 stubs where available.
+     * This must be called after stubs are registered and sections are loaded.
+     * Without this, DLLs calling other DLLs (e.g. msvcrt calling kernel32!TlsSetValue)
+     * would jump into real DLL code instead of our JS stubs.
+     */
+    patchDLLIATs(memory: Memory, win32Stubs: Win32Stubs): void {
+        let patchedCount = 0;
+
+        for (const entry of this._dllIATEntries) {
+            // Try to find a stub for this function
+            // The importedDllName might be "kernel32.dll" or "api-ms-win-core-synch-l1-1-0.dll"
+            // Stubs are registered under the canonical DLL name (e.g. "kernel32.dll")
+            const stubAddr = win32Stubs.getStubAddress(entry.importedDllName, entry.funcName)
+                ?? win32Stubs.getStubAddress(entry.importedDllName + ".dll", entry.funcName)
+                ?? null;
+
+            if (stubAddr !== null) {
+                memory.write32(entry.iatAddr, stubAddr);
+                patchedCount++;
+            }
+        }
+
+        console.log(`[DLLLoader] Patched ${patchedCount}/${this._dllIATEntries.length} DLL IAT entries with stubs`);
     }
 
     /**

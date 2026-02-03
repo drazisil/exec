@@ -39,8 +39,16 @@ function registerDataMovement(cpu: CPU): void {
     // MOV r/m32, imm32
     cpu.register(0xC7, (cpu) => {
         const { mod, rm } = cpu.decodeModRM();
+        // Must resolve the address FIRST (consuming disp8/disp32 from the instruction
+        // stream) before reading the immediate value that follows.
+        const resolved = cpu.resolveRM(mod, rm);
         const imm = cpu.fetch32();
-        cpu.writeRM32(mod, rm, imm);
+        if (resolved.isReg) {
+            cpu.regs[resolved.addr] = imm >>> 0;
+        } else {
+            const addr = cpu.applySegmentOverride(resolved.addr);
+            cpu.memory.write32(addr, imm >>> 0);
+        }
     });
 
     // MOV AL, [disp32] (also handles FS:/GS: segment override)
@@ -118,6 +126,50 @@ function registerArithmetic(cpu: CPU): void {
         const result = (op1 - op2) >>> 0;
         cpu.regs[reg] = result;
         cpu.updateFlagsArith(op1 - op2, op1, op2, true);
+    });
+
+    // SBB r/m32, r32 (subtract with borrow)
+    cpu.register(0x19, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.readRM32(mod, rm);
+        const op2 = cpu.regs[reg];
+        const borrow = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 - op2 - borrow) >>> 0;
+        cpu.writeRM32(mod, rm, result);
+        cpu.updateFlagsArith(op1 - op2 - borrow, op1, op2 + borrow, true);
+    });
+
+    // SBB r32, r/m32 (subtract with borrow)
+    cpu.register(0x1B, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.regs[reg];
+        const op2 = cpu.readRM32(mod, rm);
+        const borrow = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 - op2 - borrow) >>> 0;
+        cpu.regs[reg] = result;
+        cpu.updateFlagsArith(op1 - op2 - borrow, op1, op2 + borrow, true);
+    });
+
+    // ADC r/m32, r32 (add with carry)
+    cpu.register(0x11, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.readRM32(mod, rm);
+        const op2 = cpu.regs[reg];
+        const carry = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 + op2 + carry) >>> 0;
+        cpu.writeRM32(mod, rm, result);
+        cpu.updateFlagsArith(op1 + op2 + carry, op1, op2 + carry, false);
+    });
+
+    // ADC r32, r/m32 (add with carry)
+    cpu.register(0x13, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.regs[reg];
+        const op2 = cpu.readRM32(mod, rm);
+        const carry = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 + op2 + carry) >>> 0;
+        cpu.regs[reg] = result;
+        cpu.updateFlagsArith(op1 + op2 + carry, op1, op2 + carry, false);
     });
 
     // CMP r/m32, r32
@@ -356,8 +408,9 @@ function registerArithmetic(cpu: CPU): void {
     // MOV r/m8, imm8 (0xC6 /0)
     cpu.register(0xC6, (cpu) => {
         const { mod, rm } = cpu.decodeModRM();
-        const imm = cpu.fetch8();
+        // Must resolve address FIRST (consuming disp8/disp32) before reading immediate
         const resolved = cpu.resolveRM(mod, rm);
+        const imm = cpu.fetch8();
         if (resolved.isReg) {
             cpu.regs[resolved.addr] = (cpu.regs[resolved.addr] & 0xFFFFFF00) | imm;
         } else {
@@ -494,6 +547,20 @@ function doGroup1(cpu: CPU, mod: number, rm: number, opExt: number, op1: number,
             const result = (op1 | op2) >>> 0;
             cpu.writeRM32(mod, rm, result);
             cpu.updateFlagsLogic(result);
+            break;
+        }
+        case 2: { // ADC (add with carry)
+            const carry = cpu.getFlag(FLAG.CF) ? 1 : 0;
+            const result = (op1 + op2 + carry) >>> 0;
+            cpu.writeRM32(mod, rm, result);
+            cpu.updateFlagsArith(op1 + op2 + carry, op1, op2 + carry, false);
+            break;
+        }
+        case 3: { // SBB (subtract with borrow)
+            const borrow = cpu.getFlag(FLAG.CF) ? 1 : 0;
+            const result = (op1 - op2 - borrow) >>> 0;
+            cpu.writeRM32(mod, rm, result);
+            cpu.updateFlagsArith(op1 - op2 - borrow, op1, op2 + borrow, true);
             break;
         }
         case 4: { // AND
@@ -716,12 +783,22 @@ function registerLogic(cpu: CPU): void {
         cpu.regs[REG.EAX] = result;
     });
 
-    // 0x0C: AND EAX, imm8 (zero-extended to 32-bit)
+    // 0x0C: OR AL, imm8
     cpu.register(0x0C, (cpu) => {
         const imm = cpu.fetch8();
-        const result = (cpu.regs[REG.EAX] & imm) >>> 0;
+        const al = cpu.regs[REG.EAX] & 0xFF;
+        const result = al | imm;
+        cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | result;
         cpu.updateFlagsLogic(result);
-        cpu.regs[REG.EAX] = result;
+    });
+
+    // 0x24: AND AL, imm8
+    cpu.register(0x24, (cpu) => {
+        const imm = cpu.fetch8();
+        const al = cpu.regs[REG.EAX] & 0xFF;
+        const result = al & imm;
+        cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | result;
+        cpu.updateFlagsLogic(result);
     });
 
     // 0x0D: OR EAX, imm32

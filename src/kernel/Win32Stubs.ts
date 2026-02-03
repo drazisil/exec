@@ -388,8 +388,15 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cpu.regs[REG.EAX] = defaultHeapAddr;
     });
 
-    // HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes) -> LPVOID
+    // Bump allocator for heap/local/global allocations
     let nextHeapAlloc = 0x04000000; // heap starts at 64MB
+    function simpleAlloc(size: number): number {
+        const addr = nextHeapAlloc;
+        nextHeapAlloc = ((nextHeapAlloc + size + 15) & ~15) >>> 0;
+        return addr;
+    }
+
+    // HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes) -> LPVOID
     stubs.registerStub("kernel32.dll", "HeapAlloc", (cpu) => {
         const dwBytes = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
         const dwFlags = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
@@ -668,17 +675,18 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 16);
     });
 
-    // MultiByteToWideChar
+    // MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCCH lpMultiByteStr,
+    //   int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar) -> int
     stubs.registerStub("kernel32.dll", "MultiByteToWideChar", (cpu) => {
-        const cbMultiByte = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
-        const cchWideChar = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
-        // If output buffer is NULL, return required size
+        const lpMultiByteStr = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const cbMultiByte = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        const lpWideCharStr = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        const cchWideChar = memory.read32((cpu.regs[REG.ESP] + 24) >>> 0);
+        // If output buffer size is 0, return required size
         if (cchWideChar === 0) {
             cpu.regs[REG.EAX] = cbMultiByte;
         } else {
             // Simple: just zero-extend each byte to 16-bit
-            const lpMultiByteStr = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
-            const lpWideCharStr = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
             const count = Math.min(cbMultiByte, cchWideChar);
             for (let i = 0; i < count; i++) {
                 memory.write16(lpWideCharStr + i * 2, memory.read8(lpMultiByteStr + i));
@@ -688,15 +696,17 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 24);
     });
 
-    // WideCharToMultiByte
+    // WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWCH lpWideCharStr,
+    //   int cchWideChar, LPSTR lpMultiByteStr, int cbMultiByte,
+    //   LPCCH lpDefaultChar, LPBOOL lpUsedDefaultChar) -> int
     stubs.registerStub("kernel32.dll", "WideCharToMultiByte", (cpu) => {
-        const cchWideChar = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
-        const cbMultiByte = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        const lpWideCharStr = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const cchWideChar = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        const lpMultiByteStr = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        const cbMultiByte = memory.read32((cpu.regs[REG.ESP] + 24) >>> 0);
         if (cbMultiByte === 0) {
             cpu.regs[REG.EAX] = cchWideChar;
         } else {
-            const lpWideCharStr = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
-            const lpMultiByteStr = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
             const count = Math.min(cchWideChar, cbMultiByte);
             for (let i = 0; i < count; i++) {
                 const wc = memory.read16(lpWideCharStr + i * 2);
@@ -707,9 +717,10 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 32);
     });
 
-    // LCMapStringW - locale string mapping (stub: just return input length)
+    // LCMapStringW(LCID Locale, DWORD dwMapFlags, LPCWSTR lpSrcStr,
+    //   int cchSrc, LPWSTR lpDestStr, int cchDest) -> int
     stubs.registerStub("kernel32.dll", "LCMapStringW", (cpu) => {
-        const cchSrc = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const cchSrc = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
         cpu.regs[REG.EAX] = cchSrc;
         cleanupStdcall(cpu, memory, 24);
     });
@@ -785,24 +796,405 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 20);
     });
 
+    // SetHandleCount(UINT uNumber) -> UINT
+    // Obsolete: just returns the argument unchanged
+    stubs.registerStub("kernel32.dll", "SetHandleCount", (cpu) => {
+        const uNumber = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = uNumber;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SetStdHandle(DWORD nStdHandle, HANDLE hHandle) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetStdHandle", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetModuleFileNameA", (cpu) => {
+        const lpFilename = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const nSize = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const name = "C:\\MCity\\MCity_d.exe";
+        const len = Math.min(name.length, nSize - 1);
+        for (let i = 0; i < len; i++) {
+            memory.write8(lpFilename + i, name.charCodeAt(i));
+        }
+        memory.write8(lpFilename + len, 0);
+        cpu.regs[REG.EAX] = len;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetModuleFileNameW", (cpu) => {
+        const lpFilename = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const nSize = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const name = "C:\\MCity\\MCity_d.exe";
+        const len = Math.min(name.length, nSize - 1);
+        for (let i = 0; i < len; i++) {
+            memory.write16(lpFilename + i * 2, name.charCodeAt(i));
+        }
+        memory.write16(lpFilename + len * 2, 0);
+        cpu.regs[REG.EAX] = len;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // IsBadReadPtr(LPCVOID lp, UINT_PTR ucb) -> BOOL
+    // Returns 0 if memory is readable, non-zero if bad
+    stubs.registerStub("kernel32.dll", "IsBadReadPtr", (cpu) => {
+        const lp = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const ucb = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        // Check if the address range is within our memory bounds
+        const memSize = memory.size;
+        if (lp === 0 || lp + ucb > memSize) {
+            cpu.regs[REG.EAX] = 1; // bad pointer
+        } else {
+            cpu.regs[REG.EAX] = 0; // pointer is OK
+        }
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // IsBadWritePtr(LPVOID lp, UINT_PTR ucb) -> BOOL
+    stubs.registerStub("kernel32.dll", "IsBadWritePtr", (cpu) => {
+        const lp = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const ucb = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const memSize = memory.size;
+        if (lp === 0 || lp + ucb > memSize) {
+            cpu.regs[REG.EAX] = 1; // bad pointer
+        } else {
+            cpu.regs[REG.EAX] = 0; // pointer is OK
+        }
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // IsBadCodePtr(FARPROC lpfn) -> BOOL
+    stubs.registerStub("kernel32.dll", "IsBadCodePtr", (cpu) => {
+        const lpfn = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const memSize = memory.size;
+        if (lpfn === 0 || lpfn >= memSize) {
+            cpu.regs[REG.EAX] = 1; // bad pointer
+        } else {
+            cpu.regs[REG.EAX] = 0; // pointer is OK
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // TerminateProcess(HANDLE hProcess, UINT uExitCode) -> BOOL
+    stubs.registerStub("kernel32.dll", "TerminateProcess", (cpu) => {
+        const uExitCode = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        console.log(`\n[Win32] TerminateProcess(exitCode=${uExitCode})`);
+        cpu.halted = true;
+    });
+
+    // FatalAppExitA(UINT uAction, LPCSTR lpMessageText) -> void
+    stubs.registerStub("kernel32.dll", "FatalAppExitA", (cpu) => {
+        console.log(`\n[Win32] FatalAppExitA called`);
+        cpu.halted = true;
+    });
+
+    // RtlUnwind(PVOID TargetFrame, PVOID TargetIp, PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue) -> void
+    stubs.registerStub("kernel32.dll", "RtlUnwind", (cpu) => {
+        // Complex SEH function - for now just return without doing anything
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // RaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags, DWORD nNumberOfArguments, const ULONG_PTR *lpArguments) -> void
+    stubs.registerStub("kernel32.dll", "RaiseException", (cpu) => {
+        const code = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        console.log(`\n[Win32] RaiseException(code=0x${code.toString(16)})`);
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // InterlockedIncrement(LONG volatile *Addend) -> LONG
+    stubs.registerStub("kernel32.dll", "InterlockedIncrement", (cpu) => {
+        const pAddend = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const val = (memory.read32(pAddend) + 1) >>> 0;
+        memory.write32(pAddend, val);
+        cpu.regs[REG.EAX] = val;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // InterlockedDecrement(LONG volatile *Addend) -> LONG
+    stubs.registerStub("kernel32.dll", "InterlockedDecrement", (cpu) => {
+        const pAddend = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const val = ((memory.read32(pAddend) - 1) & 0xFFFFFFFF) >>> 0;
+        memory.write32(pAddend, val);
+        cpu.regs[REG.EAX] = val;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // InterlockedExchange(LONG volatile *Target, LONG Value) -> LONG
+    stubs.registerStub("kernel32.dll", "InterlockedExchange", (cpu) => {
+        const pTarget = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const value = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const original = memory.read32(pTarget);
+        memory.write32(pTarget, value);
+        cpu.regs[REG.EAX] = original;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // OutputDebugStringA(LPCSTR lpOutputString) -> void
+    stubs.registerStub("kernel32.dll", "OutputDebugStringA", (cpu) => {
+        // Read and print the debug string
+        const lpStr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (lpStr !== 0) {
+            let str = '';
+            for (let i = 0; i < 256; i++) {
+                const ch = memory.read8(lpStr + i);
+                if (ch === 0) break;
+                str += String.fromCharCode(ch);
+            }
+            console.log(`[OutputDebugString] ${str}`);
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // DebugBreak() -> void
+    stubs.registerStub("kernel32.dll", "DebugBreak", (_cpu) => {
+        console.log(`[Win32] DebugBreak called`);
+    });
+
+    // SetErrorMode(UINT uMode) -> UINT
+    stubs.registerStub("kernel32.dll", "SetErrorMode", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // return previous mode (0)
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // LCMapStringA(LCID Locale, DWORD dwMapFlags, LPCSTR lpSrcStr, int cchSrc, LPSTR lpDestStr, int cchDest) -> int
+    stubs.registerStub("kernel32.dll", "LCMapStringA", (cpu) => {
+        const cchSrc = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        cpu.regs[REG.EAX] = cchSrc;
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // CompareStringA(LCID Locale, DWORD dwCmpFlags, PCNZCH lpString1, int cchCount1, PCNZCH lpString2, int cchCount2) -> int
+    stubs.registerStub("kernel32.dll", "CompareStringA", (cpu) => {
+        cpu.regs[REG.EAX] = 2; // CSTR_EQUAL
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // CompareStringW(LCID Locale, DWORD dwCmpFlags, PCNZWCH lpString1, int cchCount1, PCNZWCH lpString2, int cchCount2) -> int
+    stubs.registerStub("kernel32.dll", "CompareStringW", (cpu) => {
+        cpu.regs[REG.EAX] = 2; // CSTR_EQUAL
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // GetStringTypeA(LCID Locale, DWORD dwInfoType, LPCSTR lpSrcStr, int cchSrc, LPWORD lpCharType) -> BOOL
+    stubs.registerStub("kernel32.dll", "GetStringTypeA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // GetOEMCP() -> UINT
+    stubs.registerStub("kernel32.dll", "GetOEMCP", (cpu) => {
+        cpu.regs[REG.EAX] = 437; // US OEM code page
+    });
+
+    // GetUserDefaultLCID() -> LCID
+    stubs.registerStub("kernel32.dll", "GetUserDefaultLCID", (cpu) => {
+        cpu.regs[REG.EAX] = 0x0409; // English (US)
+    });
+
+    // IsValidLocale(LCID Locale, DWORD dwFlags) -> BOOL
+    stubs.registerStub("kernel32.dll", "IsValidLocale", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // EnumSystemLocalesA(LOCALE_ENUMPROCA lpLocaleEnumProc, DWORD dwFlags) -> BOOL
+    stubs.registerStub("kernel32.dll", "EnumSystemLocalesA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE (just say we enumerated them)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetLocaleInfoW(LCID Locale, LCTYPE LCType, LPWSTR lpLCData, int cchData) -> int
+    stubs.registerStub("kernel32.dll", "GetLocaleInfoW", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // failure (no data available)
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // SetConsoleCtrlHandler(PHANDLER_ROUTINE HandlerRoutine, BOOL Add) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetConsoleCtrlHandler", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetEnvironmentVariableA(LPCSTR lpName, LPCSTR lpValue) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetEnvironmentVariableA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetEnvironmentVariableW", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect) -> BOOL
+    stubs.registerStub("kernel32.dll", "VirtualProtect", (cpu) => {
+        const lpflOldProtect = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        if (lpflOldProtect !== 0) {
+            memory.write32(lpflOldProtect, 0x04); // PAGE_READWRITE
+        }
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // lstrlenA(LPCSTR lpString) -> int
+    stubs.registerStub("kernel32.dll", "lstrlenA", (cpu) => {
+        const lpStr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        let len = 0;
+        if (lpStr !== 0) {
+            while (len < 65536) {
+                if (memory.read8(lpStr + len) === 0) break;
+                len++;
+            }
+        }
+        cpu.regs[REG.EAX] = len;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // lstrcpyA(LPSTR lpString1, LPCSTR lpString2) -> LPSTR
+    stubs.registerStub("kernel32.dll", "lstrcpyA", (cpu) => {
+        const lpDst = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpSrc = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        let i = 0;
+        while (i < 65536) {
+            const ch = memory.read8(lpSrc + i);
+            memory.write8(lpDst + i, ch);
+            if (ch === 0) break;
+            i++;
+        }
+        cpu.regs[REG.EAX] = lpDst;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // LocalAlloc(UINT uFlags, SIZE_T uBytes) -> HLOCAL
+    stubs.registerStub("kernel32.dll", "LocalAlloc", (cpu) => {
+        const uBytes = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        // Use our simple heap
+        const addr = simpleAlloc(uBytes);
+        cpu.regs[REG.EAX] = addr;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // LocalFree(HLOCAL hMem) -> HLOCAL
+    stubs.registerStub("kernel32.dll", "LocalFree", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // NULL = success
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GlobalAlloc(UINT uFlags, SIZE_T dwBytes) -> HGLOBAL
+    stubs.registerStub("kernel32.dll", "GlobalAlloc", (cpu) => {
+        const dwBytes = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const addr = simpleAlloc(dwBytes);
+        cpu.regs[REG.EAX] = addr;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GlobalFree(HGLOBAL hMem) -> HGLOBAL
+    stubs.registerStub("kernel32.dll", "GlobalFree", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // NULL = success
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // HeapValidate(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem) -> BOOL
+    stubs.registerStub("kernel32.dll", "HeapValidate", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE (heap is valid)
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // HeapDestroy(HANDLE hHeap) -> BOOL
+    stubs.registerStub("kernel32.dll", "HeapDestroy", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // DuplicateHandle(HANDLE, HANDLE, HANDLE, LPHANDLE, DWORD, BOOL, DWORD) -> BOOL
+    stubs.registerStub("kernel32.dll", "DuplicateHandle", (cpu) => {
+        const lpTargetHandle = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        if (lpTargetHandle !== 0) {
+            // Write a fake handle
+            memory.write32(lpTargetHandle, 0x200);
+        }
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 28);
+    });
+
+    // SetFilePointer(HANDLE, LONG, PLONG, DWORD) -> DWORD
+    stubs.registerStub("kernel32.dll", "SetFilePointer", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // new position = 0
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // FlushFileBuffers(HANDLE hFile) -> BOOL
+    stubs.registerStub("kernel32.dll", "FlushFileBuffers", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SetEndOfFile(HANDLE hFile) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetEndOfFile", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetCurrentDirectoryA(DWORD nBufferLength, LPSTR lpBuffer) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetCurrentDirectoryA", (cpu) => {
+        const nBufferLength = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpBuffer = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const dir = "C:\\MCity";
+        if (nBufferLength > dir.length) {
+            for (let i = 0; i < dir.length; i++) {
+                memory.write8(lpBuffer + i, dir.charCodeAt(i));
+            }
+            memory.write8(lpBuffer + dir.length, 0);
+            cpu.regs[REG.EAX] = dir.length;
+        } else {
+            cpu.regs[REG.EAX] = dir.length + 1; // required size
+        }
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetCurrentDirectoryA(LPCSTR lpPathName) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetCurrentDirectoryA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetWindowsDirectoryA(LPSTR lpBuffer, UINT uSize) -> UINT
+    stubs.registerStub("kernel32.dll", "GetWindowsDirectoryA", (cpu) => {
+        const lpBuffer = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const uSize = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const dir = "C:\\WINDOWS";
+        if (uSize > dir.length) {
+            for (let i = 0; i < dir.length; i++) {
+                memory.write8(lpBuffer + i, dir.charCodeAt(i));
+            }
+            memory.write8(lpBuffer + dir.length, 0);
+        }
+        cpu.regs[REG.EAX] = dir.length;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
     // --- MSVCRT stubs ---
 
     // _initterm(PVOID* pfbegin, PVOID* pfend) -> void
     // Calls each non-null function pointer in the array [pfbegin, pfend)
     // For now, just skip it - these are C++ static initializers
-    stubs.registerStub("msvcrt.dll", "_initterm", (cpu) => {
-        cleanupStdcall(cpu, memory, 8);
+    stubs.registerStub("msvcrt.dll", "_initterm", (_cpu) => {
+        // cdecl: caller cleans up args
     });
 
     // _initterm_e(PVOID* pfbegin, PVOID* pfend) -> int
     stubs.registerStub("msvcrt.dll", "_initterm_e", (cpu) => {
         cpu.regs[REG.EAX] = 0; // success
-        cleanupStdcall(cpu, memory, 8);
+        // cdecl: caller cleans up args
     });
 
     // __set_app_type(int apptype) -> void
-    stubs.registerStub("msvcrt.dll", "__set_app_type", (cpu) => {
-        cleanupStdcall(cpu, memory, 4);
+    stubs.registerStub("msvcrt.dll", "__set_app_type", (_cpu) => {
+        // cdecl: caller cleans up args
     });
 
     // __p__fmode() -> int*
@@ -825,10 +1217,10 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         // cdecl: caller cleans up
     });
 
-    // _except_handler3 - SEH handler
+    // _except_handler3 - SEH handler (cdecl calling convention)
     stubs.registerStub("msvcrt.dll", "_except_handler3", (cpu) => {
         cpu.regs[REG.EAX] = 1; // ExceptionContinueSearch
-        cleanupStdcall(cpu, memory, 16);
+        // cdecl: caller cleans up args
     });
 
     // __getmainargs(int* argc, char*** argv, char*** envp, int doWildCard, _startupinfo* startupInfo) -> int
