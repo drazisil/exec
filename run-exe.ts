@@ -164,6 +164,10 @@ for (const mapping of exe.importResolver.getAddressMappings()) {
 validRanges.push([0x00200000, 0x00202000, "stubs"]);
 // Sentinel HLT address
 validRanges.push([SENTINEL_ADDR, SENTINEL_ADDR + 1, "sentinel-hlt"]);
+// Thread sentinel address
+validRanges.push([0x001FE000, 0x001FE004, "thread-sentinel"]);
+// Thread stack region
+validRanges.push([0x05000000, 0x05100000, "thread-stacks"]);
 
 function isValidEIP(eip: number): string | null {
     for (const [start, end, name] of validRanges) {

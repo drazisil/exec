@@ -862,9 +862,223 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 12);
     });
 
+    // ---- Cooperative threading state ----
+    // We track threads created by CreateThread and execute them cooperatively
+    // when the main thread calls Sleep (indicating a wait loop).
+    interface PendingThread {
+        startAddress: number;
+        parameter: number;
+        handle: number;
+        threadId: number;
+        suspended: boolean;
+        completed: boolean;
+        // Saved CPU state when thread is paused (only set after first run)
+        savedState?: {
+            regs: Uint32Array;
+            eip: number;
+            eflags: number;
+            fpuStack: Float64Array;
+            fpuTop: number;
+            fpuStatusWord: number;
+            fpuControlWord: number;
+            fpuTagWord: number;
+        };
+    }
+    const pendingThreads: PendingThread[] = [];
+    let nextThreadId = 1001;
+    let nextThreadHandle = 0x0000BEEF;
+    // Thread stack region: allocate at 0x05000000, 256KB per thread
+    const THREAD_STACK_BASE = 0x05000000;
+    const THREAD_STACK_SIZE = 256 * 1024;
+    let threadStackNext = THREAD_STACK_BASE;
+    let sleepCount = 0;
+    let isRunningThread = false;  // true when we're executing a thread's code
+    let currentThreadIdx = -1;    // index of currently running thread (-1 = main)
+    // Sentinel address for thread return detection
+    const THREAD_SENTINEL = 0x001FE000;
+    memory.write8(THREAD_SENTINEL, 0xCD);   // INT
+    memory.write8(THREAD_SENTINEL + 1, 0xFE); // 0xFE - triggers our stub handler
+    memory.write8(THREAD_SENTINEL + 2, 0xC3); // RET (won't be reached)
+    // Register the sentinel as a patched address for thread exit
+    stubs.patchAddress(THREAD_SENTINEL, "_threadReturn", (cpu) => {
+        // Thread function returned normally
+        if (currentThreadIdx >= 0) {
+            const thread = pendingThreads[currentThreadIdx];
+            console.log(`  [Thread] Thread ${thread.threadId} returned normally`);
+            thread.completed = true;
+        }
+        // Signal that we need to switch back to main thread
+        cpu.halted = true;
+    });
+
     // Sleep(DWORD dwMilliseconds) -> void
+    // Cooperative scheduler: when main thread sleeps, run pending threads
     stubs.registerStub("kernel32.dll", "Sleep", (cpu) => {
-        // Just skip it
+        sleepCount++;
+
+        // Check for pending threads to run
+        const runnableThread = pendingThreads.find(t => !t.suspended && !t.completed);
+        if (runnableThread) {
+            const threadIdx = pendingThreads.indexOf(runnableThread);
+            console.log(`  [Scheduler] Main thread Sleep #${sleepCount} - switching to thread ${runnableThread.threadId} (startAddr=0x${runnableThread.startAddress.toString(16)})`);
+
+            // Save main thread state
+            const mainState = {
+                regs: new Uint32Array(cpu.regs),
+                eip: cpu.eip,
+                eflags: cpu.eflags,
+                fpuStack: new Float64Array(cpu.fpuStack),
+                fpuTop: cpu.fpuTop,
+                fpuStatusWord: cpu.fpuStatusWord,
+                fpuControlWord: cpu.fpuControlWord,
+                fpuTagWord: cpu.fpuTagWord,
+            };
+
+            // Set up thread state
+            isRunningThread = true;
+            currentThreadIdx = threadIdx;
+
+            if (runnableThread.savedState) {
+                // Resume thread from where it left off
+                cpu.regs.set(runnableThread.savedState.regs);
+                cpu.eip = runnableThread.savedState.eip;
+                cpu.eflags = runnableThread.savedState.eflags;
+                cpu.fpuStack.set(runnableThread.savedState.fpuStack);
+                cpu.fpuTop = runnableThread.savedState.fpuTop;
+                cpu.fpuStatusWord = runnableThread.savedState.fpuStatusWord;
+                cpu.fpuControlWord = runnableThread.savedState.fpuControlWord;
+                cpu.fpuTagWord = runnableThread.savedState.fpuTagWord;
+            } else {
+                // First run: set up thread's initial state
+                const stackTop = threadStackNext + THREAD_STACK_SIZE - 16;
+                threadStackNext += THREAD_STACK_SIZE;
+
+                // Thread function signature: DWORD WINAPI ThreadProc(LPVOID lpParameter)
+                // Stack layout at entry (as if CALL pushed return addr on top of args):
+                //   [ESP]   = return address (sentinel)
+                //   [ESP+4] = lpParameter
+                let threadESP = stackTop;
+                threadESP -= 4;
+                memory.write32(threadESP, runnableThread.parameter); // lpParameter at [ESP+4]
+                threadESP -= 4;
+                memory.write32(threadESP, THREAD_SENTINEL); // return address at [ESP]
+
+                cpu.regs[REG.ESP] = threadESP >>> 0;
+                cpu.regs[REG.EBP] = 0;
+                cpu.regs[REG.EAX] = 0;
+                cpu.regs[REG.ECX] = 0;
+                cpu.regs[REG.EDX] = 0;
+                cpu.regs[REG.EBX] = 0;
+                cpu.regs[REG.ESI] = 0;
+                cpu.regs[REG.EDI] = 0;
+                cpu.eip = runnableThread.startAddress;
+                cpu.eflags = 0x202; // IF set
+            }
+
+            // Run thread for a time slice (100K steps)
+            const threadStepLimit = 100_000;
+            cpu.halted = false;
+            let threadSteps = 0;
+            let threadError: Error | null = null;
+
+            // Log first few steps of thread execution for debugging
+            const logFirstSteps = !runnableThread.savedState;
+            if (logFirstSteps) {
+                console.log(`  [Thread] Starting thread at EIP=0x${cpu.eip.toString(16)}, ESP=0x${cpu.regs[REG.ESP].toString(16)}`);
+                // Dump the parameter object to understand what the thread will access
+                const paramAddr = runnableThread.parameter;
+                console.log(`  [Thread] Parameter object at 0x${paramAddr.toString(16)}:`);
+                for (let off = 0; off <= 0x50; off += 4) {
+                    const val = memory.read32(paramAddr + off);
+                    if (val !== 0) {
+                        console.log(`    [+0x${off.toString(16)}] = 0x${val.toString(16)}`);
+                    }
+                }
+            }
+
+            try {
+                let lastValidThreadEIP = cpu.eip;
+                while (!cpu.halted && threadSteps < threadStepLimit) {
+                    if (logFirstSteps && threadSteps < 50) {
+                        const op = memory.read8(cpu.eip);
+                        console.log(`  [Thread] step ${threadSteps}: EIP=0x${cpu.eip.toString(16)} op=0x${op.toString(16).padStart(2, '0')} ESP=0x${(cpu.regs[REG.ESP] >>> 0).toString(16)} EAX=0x${(cpu.regs[REG.EAX] >>> 0).toString(16)}`);
+                    }
+                    const eipBefore = cpu.eip;
+                    cpu.step();
+                    threadSteps++;
+
+                    // Check for thread runaway: EIP outside valid code regions
+                    const eip = cpu.eip >>> 0;
+                    const inStubs = eip >= 0x00200000 && eip < 0x00202000;
+                    const inExe = eip >= 0x00400000 && eip < 0x02000000;
+                    const inDlls = eip >= 0x10000000 && eip < 0x40000000;
+                    const inThreadSentinel = eip >= 0x001FE000 && eip < 0x001FE004;
+                    if (!inStubs && !inExe && !inDlls && !inThreadSentinel && threadSteps > 10) {
+                        console.log(`  [Thread] RUNAWAY at step ${threadSteps}: EIP=0x${eip.toString(16)} (prev=0x${eipBefore.toString(16)}, lastValid=0x${lastValidThreadEIP.toString(16)})`);
+                        console.log(`  [Thread] State: ${cpu.toString()}`);
+                        // Dump a few bytes at EIP
+                        const bytes: string[] = [];
+                        for (let i = 0; i < 16; i++) bytes.push(memory.read8(eip + i).toString(16).padStart(2, '0'));
+                        console.log(`  [Thread] Bytes at EIP: ${bytes.join(' ')}`);
+                        runnableThread.completed = true; // prevent re-running
+                        break;
+                    }
+                    if (inStubs || inExe || inDlls) {
+                        lastValidThreadEIP = eip;
+                    }
+                }
+            } catch (err: any) {
+                threadError = err;
+                console.log(`  [Thread] Thread ${runnableThread.threadId} error after ${threadSteps} steps: ${err.message}`);
+                console.log(`  [Thread] State: ${cpu.toString()}`);
+            }
+
+            const threadCompleted = runnableThread.completed;
+
+            if (!threadCompleted && !threadError) {
+                // Thread yielded (ran out of time slice) - save its state
+                runnableThread.savedState = {
+                    regs: new Uint32Array(cpu.regs),
+                    eip: cpu.eip,
+                    eflags: cpu.eflags,
+                    fpuStack: new Float64Array(cpu.fpuStack),
+                    fpuTop: cpu.fpuTop,
+                    fpuStatusWord: cpu.fpuStatusWord,
+                    fpuControlWord: cpu.fpuControlWord,
+                    fpuTagWord: cpu.fpuTagWord,
+                };
+                console.log(`  [Scheduler] Thread ${runnableThread.threadId} yielded after ${threadSteps} steps (EIP=0x${cpu.eip.toString(16)})`);
+            } else if (threadCompleted) {
+                console.log(`  [Scheduler] Thread ${runnableThread.threadId} completed after ${threadSteps} steps`);
+            } else if (threadError) {
+                // Mark as completed to avoid re-running
+                runnableThread.completed = true;
+            }
+
+            // Restore main thread state
+            cpu.regs.set(mainState.regs);
+            cpu.eip = mainState.eip;
+            cpu.eflags = mainState.eflags;
+            cpu.fpuStack.set(mainState.fpuStack);
+            cpu.fpuTop = mainState.fpuTop;
+            cpu.fpuStatusWord = mainState.fpuStatusWord;
+            cpu.fpuControlWord = mainState.fpuControlWord;
+            cpu.fpuTagWord = mainState.fpuTagWord;
+            cpu.halted = false;
+            isRunningThread = false;
+            currentThreadIdx = -1;
+
+            // Do normal Sleep cleanup for main thread
+            cleanupStdcall(cpu, memory, 4);
+            return;
+        }
+
+        // No threads to run - normal sleep behavior
+        if (sleepCount >= 50) {
+            console.log(`\n[Win32] Sleep() called ${sleepCount} times with no runnable threads - halting`);
+            cpu.halted = true;
+            return;
+        }
         cleanupStdcall(cpu, memory, 4);
     });
 
@@ -999,19 +1213,42 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     //              LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId) -> HANDLE
     stubs.registerStub("kernel32.dll", "CreateThread", (cpu) => {
         const lpStartAddress = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const lpParameter = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
         const dwCreationFlags = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
         const lpThreadId = memory.read32((cpu.regs[REG.ESP] + 24) >>> 0);
-        console.log(`  [Win32] CreateThread(startAddr=0x${lpStartAddress.toString(16)}, flags=0x${dwCreationFlags.toString(16)})`);
-        // Write a fake thread ID
+        const CREATE_SUSPENDED = 0x4;
+        const isSuspended = (dwCreationFlags & CREATE_SUSPENDED) !== 0;
+        const threadId = nextThreadId++;
+        const handle = nextThreadHandle++;
+
+        console.log(`  [Win32] CreateThread(startAddr=0x${lpStartAddress.toString(16)}, param=0x${lpParameter.toString(16)}, flags=0x${dwCreationFlags.toString(16)}) -> handle=0x${handle.toString(16)}, tid=${threadId}`);
+
+        // Save thread info for cooperative execution
+        pendingThreads.push({
+            startAddress: lpStartAddress,
+            parameter: lpParameter,
+            handle,
+            threadId,
+            suspended: isSuspended,
+            completed: false,
+        });
+
+        // Write thread ID to output parameter
         if (lpThreadId !== 0) {
-            memory.write32(lpThreadId, 1001); // fake thread ID
+            memory.write32(lpThreadId, threadId);
         }
-        cpu.regs[REG.EAX] = 0x0000BEEF; // fake thread handle (non-null = success)
+        cpu.regs[REG.EAX] = handle;
         cleanupStdcall(cpu, memory, 24);
     });
 
     // ResumeThread(HANDLE hThread) -> DWORD (previous suspend count)
     stubs.registerStub("kernel32.dll", "ResumeThread", (cpu) => {
+        const hThread = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const thread = pendingThreads.find(t => t.handle === hThread);
+        if (thread && thread.suspended) {
+            console.log(`  [Win32] ResumeThread(0x${hThread.toString(16)}) - unsuspending thread ${thread.threadId}`);
+            thread.suspended = false;
+        }
         cpu.regs[REG.EAX] = 1; // previous suspend count was 1
         cleanupStdcall(cpu, memory, 4);
     });
@@ -1020,7 +1257,10 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     stubs.registerStub("kernel32.dll", "ExitThread", (cpu) => {
         const exitCode = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
         console.log(`  [Win32] ExitThread(${exitCode})`);
-        // For now just return - in a real implementation this would terminate the thread
+        if (currentThreadIdx >= 0) {
+            pendingThreads[currentThreadIdx].completed = true;
+        }
+        cpu.halted = true; // Signal scheduler to switch back to main
     });
 
     // GetExitCodeThread(HANDLE hThread, LPDWORD lpExitCode) -> BOOL
@@ -1051,21 +1291,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 16);
     });
 
-    // Sleep(DWORD dwMilliseconds) -> void
-    let sleepCount = 0;
-    stubs.registerStub("kernel32.dll", "Sleep", (cpu) => {
-        sleepCount++;
-        if (sleepCount === 1) {
-            console.log(`  [Win32] Sleep() first call`);
-        }
-        if (sleepCount >= 5) {
-            console.log(`\n[Win32] Sleep() called ${sleepCount} times - game appears stuck in a wait loop`);
-            console.log(`  This likely means the game is waiting for a thread we created but didn't run.`);
-            cpu.halted = true;
-            return;
-        }
-        cleanupStdcall(cpu, memory, 4);
-    });
+    // Sleep stub - duplicate removed, the cooperative version is registered above (line ~866)
 
     // =============== Synchronization ===============
 
