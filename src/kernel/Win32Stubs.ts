@@ -46,6 +46,8 @@ export class Win32Stubs {
     private _nextStubAddr: number = STUB_BASE;
     private _memory: Memory;
     private _installed = false;
+    private _callLog: string[] = [];
+    private _callLogSize = 50;
 
     constructor(memory: Memory) {
         this._memory = memory;
@@ -174,9 +176,32 @@ export class Win32Stubs {
             throw new Error(`Unknown Win32 stub at 0x${stubAddr.toString(16)}`);
         }
 
+        // Log the stub call
+        this._callLog.push(`${entry.name} @ 0x${stubAddr.toString(16)}`);
+        if (this._callLog.length > this._callLogSize) {
+            this._callLog.shift();
+        }
+
         // Execute the JS handler
         entry.handler(cpu);
         // EIP is already pointing at RET, so the CPU will execute RET next
+    }
+
+    /**
+     * Get the recent stub call log
+     */
+    getCallLog(): string[] {
+        return [...this._callLog];
+    }
+
+    /**
+     * Look up the stub address for a given DLL!function name.
+     * Returns the trampoline address or 0 if not found.
+     */
+    lookupStubAddress(dllName: string, funcName: string): number {
+        const key = `${dllName.toLowerCase()}!${funcName}`;
+        const entry = this._stubs.get(key);
+        return entry ? entry.address : 0;
     }
 
     /**
@@ -562,13 +587,56 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // GetProcAddress(HMODULE hModule, LPCSTR lpProcName) -> FARPROC
     stubs.registerStub("kernel32.dll", "GetProcAddress", (cpu) => {
-        cpu.regs[REG.EAX] = 0; // NULL (not found - game should handle gracefully)
+        const hModule = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const namePtr = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        let procName = "";
+        // Check if it's an ordinal (high word is 0)
+        if ((namePtr & 0xFFFF0000) === 0) {
+            procName = `ordinal#${namePtr}`;
+        } else {
+            for (let i = 0; i < 260; i++) {
+                const ch = memory.read8(namePtr + i);
+                if (ch === 0) break;
+                procName += String.fromCharCode(ch);
+            }
+        }
+
+        // Try to find the function in our registered stubs
+        // Search across common DLLs
+        const dllsToSearch = [
+            "kernel32.dll", "user32.dll", "msvcrt.dll", "ntdll.dll",
+            "advapi32.dll", "gdi32.dll", "shell32.dll", "ole32.dll",
+        ];
+        let stubAddr = 0;
+        for (const dll of dllsToSearch) {
+            stubAddr = stubs.lookupStubAddress(dll, procName);
+            if (stubAddr) break;
+        }
+
+        if (stubAddr) {
+            console.log(`  [Win32] GetProcAddress(0x${hModule.toString(16)}, "${procName}") -> 0x${stubAddr.toString(16)}`);
+            cpu.regs[REG.EAX] = stubAddr;
+        } else {
+            console.log(`  [Win32] GetProcAddress(0x${hModule.toString(16)}, "${procName}") -> NULL`);
+            cpu.regs[REG.EAX] = 0;
+        }
         cleanupStdcall(cpu, memory, 8);
     });
 
     // LoadLibraryA(LPCSTR lpLibFileName) -> HMODULE
     stubs.registerStub("kernel32.dll", "LoadLibraryA", (cpu) => {
-        cpu.regs[REG.EAX] = 0; // NULL (failed to load)
+        const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        let name = "";
+        for (let i = 0; i < 260; i++) {
+            const ch = memory.read8(namePtr + i);
+            if (ch === 0) break;
+            name += String.fromCharCode(ch);
+        }
+        console.log(`  [Win32] LoadLibraryA("${name}")`);
+        // Return fake module handle based on DLL name hash (non-zero = success)
+        // The CRT uses LoadLibraryA to get handles for GetProcAddress calls
+        const hash = name.toLowerCase().split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0) >>> 0;
+        cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000; // Ensure non-zero and in valid range
         cleanupStdcall(cpu, memory, 4);
     });
 
@@ -588,6 +656,18 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     // IsDebuggerPresent() -> BOOL
     stubs.registerStub("kernel32.dll", "IsDebuggerPresent", (cpu) => {
         cpu.regs[REG.EAX] = 0; // FALSE - no debugger
+    });
+
+    // IsProcessorFeaturePresent(DWORD ProcessorFeature) -> BOOL
+    stubs.registerStub("kernel32.dll", "IsProcessorFeaturePresent", (cpu) => {
+        const feature = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        // PF_XMMI_INSTRUCTIONS_AVAILABLE (6) = SSE
+        // PF_XMMI64_INSTRUCTIONS_AVAILABLE (10) = SSE2
+        // PF_FLOATING_POINT_EMULATED (1) = soft FP
+        // Return TRUE for common features to avoid CRT fallbacks
+        const supported = feature === 6 || feature === 10; // SSE + SSE2
+        cpu.regs[REG.EAX] = supported ? 1 : 0;
+        cleanupStdcall(cpu, memory, 4);
     });
 
     // SetUnhandledExceptionFilter(LPTOP_LEVEL_EXCEPTION_FILTER lpTopLevelExceptionFilter) -> LPTOP_LEVEL_EXCEPTION_FILTER
@@ -1248,6 +1328,50 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         // cdecl: caller cleans up
     });
 
+    // =============== USER32.DLL ===============
+
+    // MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType) -> int
+    stubs.registerStub("user32.dll", "MessageBoxA", (cpu) => {
+        const lpText = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const lpCaption = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const uType = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        let text = "", caption = "";
+        for (let i = 0; i < 1024; i++) { const ch = memory.read8(lpText + i); if (ch === 0) break; text += String.fromCharCode(ch); }
+        for (let i = 0; i < 256; i++) { const ch = memory.read8(lpCaption + i); if (ch === 0) break; caption += String.fromCharCode(ch); }
+        console.log(`\n  [Win32] MessageBoxA("${caption}", "${text.replace(/\n/g, "\\n")}")`);
+        // MB_ABORTRETRYIGNORE has Abort=3, Retry=4, Ignore=5
+        // MB_OK has OK=1
+        // For debug assertions, return Ignore (5) to continue execution
+        // uType & 0xF gives the button type: 2 = MB_ABORTRETRYIGNORE
+        const btnType = uType & 0xF;
+        if (btnType === 2) {
+            cpu.regs[REG.EAX] = 5; // IDIGNORE - continue past assertion
+        } else {
+            cpu.regs[REG.EAX] = 1; // IDOK
+        }
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // MessageBoxW(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType) -> int
+    stubs.registerStub("user32.dll", "MessageBoxW", (cpu) => {
+        console.log(`  [Win32] MessageBoxW() called`);
+        cpu.regs[REG.EAX] = 1; // IDOK
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // GetActiveWindow() -> HWND
+    stubs.registerStub("user32.dll", "GetActiveWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // NULL (no active window)
+    });
+
+    // GetLastActivePopup(HWND hWnd) -> HWND
+    stubs.registerStub("user32.dll", "GetLastActivePopup", (cpu) => {
+        // Return the same handle passed in (or NULL if NULL)
+        const hWnd = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = hWnd;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
     console.log(`[Win32Stubs] Registered ${stubs.count} API stubs in memory at 0x${STUB_BASE.toString(16)}`);
 }
 
@@ -1273,6 +1397,15 @@ export function patchCRTInternals(stubs: Win32Stubs): void {
     stubs.patchAddress(0x00a06910, "__sbh_alloc_block", (cpu) => {
         cpu.regs[REG.EAX] = 0; // NULL = allocation failed, use HeapAlloc fallback
         // cdecl: caller cleans up the 1 arg
+    });
+
+    // _CrtDbgReport at 0x009f9300 - CRT debug assertion reporter
+    // Called by _ASSERTE macros in the debug CRT. Our heap doesn't maintain
+    // debug CRT linked list headers, so assertions fire on every free.
+    // Return 0 = continue execution (don't break into debugger).
+    stubs.patchAddress(0x009f9300, "_CrtDbgReport", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // 0 = continue, 1 = debug break
+        // cdecl: caller cleans up (variable args)
     });
 }
 

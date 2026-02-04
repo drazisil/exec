@@ -4,7 +4,7 @@
 
 ```bash
 # Native node TS execution (PREFERRED - no build step needed):
-node --experimental-transform-types run-exe.ts
+node run-exe.ts
 
 # Or via npm script:
 npm run run
@@ -19,18 +19,13 @@ The tsconfig uses `rewriteRelativeImportExtensions: true` to handle this for com
 
 ## Current Status
 
-Emulator executes **~22,900+ instructions** through the MSVC CRT startup sequence
-(mainCRTStartup). The CRT initialization is progressing through heap setup, string
-functions, locale initialization, stdio setup, and more.
+Emulator executes **millions of instructions** through the MSVC CRT startup sequence
+(mainCRTStartup) and into game initialization. CRT initialization completes through
+heap setup, string functions, locale init, stdio setup, FPU init, and `_initterm`.
 
-### Current Crash Point
-```
-Steps executed: 22929
-EIP=0x22014197 (inside api-ms-win-core-synch-l1-1-0.dll)
-Error: Unknown opcode 0xC5
-```
-This is IsBadReadPtr being called from the main exe's IAT, going into real KERNEL32
-code. Being fixed by adding the IsBadReadPtr stub and many other CRT-critical stubs.
+### Current Status
+Execution runs to the 10M step limit without crashing. The CRT FPU initialization
+completes (x87 FPU fully emulated) and proceeds into game code.
 
 ### Win32 API Stub System
 Instead of executing real DLL code (which needs Windows kernel structures), we
@@ -65,9 +60,14 @@ patches ~239 of ~7867 DLL IAT entries (the rest go to functions we haven't stubb
   _except_handler3 are cdecl but had stdcall cleanup, double-popping the stack.
 - **OR AL,imm8 (0x0C) mislabeled**: Was labeled AND and operated on full EAX.
 - **Missing opcodes added**: AND AL,imm8 (0x24), SBB (0x19/0x1B), ADC (0x11/0x13).
+- **8-bit register encoding bugs**: readReg8/writeReg8 were reading low byte of the
+  wrong GPR instead of AH/CH/DH/BH (e.g. rm=5 read EBP low instead of CH high).
+  Fixed by adding proper readRM8/writeRM8/readReg8/writeReg8 helpers.
+- **0x66 operand-size prefix ignored**: MOV r/m32,imm32 was consuming 4 bytes of
+  immediate even with 0x66 prefix (should be 2), misaligning all subsequent EIPs.
 
 ### Step Count Progression
-16 → 494 → 3043 → 8114 → 21094 → 22929 (and growing)
+16 → 494 → 3043 → 8114 → 21094 → 22929 → 46,966 → 10,000,000+ (and growing)
 
 ## Project Structure
 
@@ -90,7 +90,7 @@ src/
     DLLLoader.ts    <- Loads real Windows DLLs, applies relocations
     ImportResolver.ts <- Resolves IAT entries, writes stubs
   emulator/
-    opcodes.ts      <- ~60 x86-32 instruction handlers
+    opcodes.ts      <- ~90+ x86-32 instruction handlers (incl. x87 FPU)
     VRAMVisualizer.ts <- Memory write monitor for graphics
     index.ts        <- Central re-exports for all modules
 
@@ -123,10 +123,11 @@ run-exe.ts uses 2GB. Electron uses fallback (256MB down to 32MB).
 - DLL IAT patching: loaded DLLs' IATs redirected to stubs (239/7867 entries)
 - API forwarding: api-ms-win-* DLLs forward to kernel32/ntdll/etc
 - Win32 API stubs: ~100+ functions stubbed with JS handlers via INT 0xFE
-- CPU: ~60 opcodes, ModR/M addressing, segment overrides (FS/GS)
+- x87 FPU: full emulation of 0xD8-0xDF (FLD/FST/FADD/FMUL/FDIV/FCOM/FNSTSW etc.)
+- CPU: ~90+ opcodes, ModR/M addressing, segment overrides (FS/GS), 0x66 prefix
 - TEB/PEB: allocated and initialized with stack bounds
 - Bump allocator heap: HeapAlloc/LocalAlloc/GlobalAlloc share a bump allocator at 0x04000000
-- CRT startup: progressing through mainCRTStartup (~22,900 instructions)
+- CRT startup: completed through mainCRTStartup into game init (millions of instructions)
 - Electron: UI with canvas, stats sidebar, pause/step/reset controls
 - VRAM visualizer: infrastructure ready but no game graphics yet
 
@@ -166,10 +167,10 @@ thread-local data.
 
 ```bash
 # Run with full output:
-node --experimental-transform-types run-exe.ts
+node run-exe.ts
 
 # Quick test (5 second timeout):
-timeout 5 node --experimental-transform-types run-exe.ts 2>&1 | tail -30
+timeout 5 node run-exe.ts 2>&1 | tail -30
 
 # Build for electron:
 npm run build

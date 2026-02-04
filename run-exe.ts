@@ -123,6 +123,11 @@ const eip = exe.optionalHeader.imageBase + entryRVA;
 console.log(`DEBUG: Setting EIP = imageBase(${exe.optionalHeader.imageBase}) + entryRVA(${entryRVA}) = ${eip} (0x${(eip >>> 0).toString(16)})`);
 cpu.eip = (eip >>> 0);
 
+// Write a HLT instruction at a sentinel address so when mainCRTStartup returns,
+// it hits HLT instead of executing from address 0
+const SENTINEL_ADDR = 0x001FF000;  // Just below stub region
+mem.write8(SENTINEL_ADDR, 0xF4);   // HLT opcode
+
 // Stack at top of allocated memory
 const memSize = mem.size;
 const stackBase = memSize - 16;  // Leave some headroom
@@ -130,23 +135,107 @@ const stackLimit = memSize - (128 * 1024);  // 128KB stack
 cpu.regs[REG.ESP] = stackBase >>> 0;
 cpu.regs[REG.EBP] = stackBase >>> 0;
 
+// Push sentinel return address so mainCRTStartup returns to HLT
+cpu.regs[REG.ESP] -= 4;
+mem.write32(cpu.regs[REG.ESP], SENTINEL_ADDR);
+
 // Initialize TEB/PEB with actual stack information
 kernelStructures.initializeKernelStructures(stackBase, stackLimit);
 
 console.log("\n=== Starting Emulation ===\n");
 console.log(`Initial state: ${cpu.toString()}\n`);
 
-cpu.enableTrace(30);
+// Build a set of valid EIP ranges (sections + DLL ranges + stub region)
+const validRanges: Array<[number, number, string]> = [];
+
+// Main exe sections
+for (const section of exe.sectionHeaders) {
+    const start = exe.optionalHeader.imageBase + section.virtualAddress;
+    const end = start + section.virtualSize;
+    validRanges.push([start, end, `exe:${section.name}`]);
+}
+
+// DLL ranges
+for (const mapping of exe.importResolver.getAddressMappings()) {
+    validRanges.push([mapping.baseAddress, mapping.endAddress, `dll:${mapping.dllName}`]);
+}
+
+// Stub region
+validRanges.push([0x00200000, 0x00202000, "stubs"]);
+// Sentinel HLT address
+validRanges.push([SENTINEL_ADDR, SENTINEL_ADDR + 1, "sentinel-hlt"]);
+
+function isValidEIP(eip: number): string | null {
+    for (const [start, end, name] of validRanges) {
+        if (eip >= start && eip < end) return name;
+    }
+    return null;
+}
+
+cpu.enableTrace(200);
+
+let lastValidStep = 0;
+let lastValidEIP = 0;
+let lastValidRegion = "";
+let detectedRunaway = false;
 
 try {
-    cpu.run(10_000_000);
+    // Custom run loop with EIP validity checking
+    const maxSteps = 10_000_000;
+    let stepCount = 0;
+    while (!cpu.halted && stepCount < maxSteps) {
+        const eipBefore = cpu.eip;
+        cpu.step();
+        stepCount++;
+
+        const region = isValidEIP(cpu.eip);
+        if (region) {
+            lastValidStep = stepCount;
+            lastValidEIP = eipBefore;
+            lastValidRegion = region;
+        } else if (!detectedRunaway && stepCount > 100) {
+            // EIP is outside all valid regions - this is the transition point
+            detectedRunaway = true;
+            console.log(`\n!!! RUNAWAY DETECTED at step ${stepCount} !!!`);
+            console.log(`  Current EIP: 0x${(cpu.eip >>> 0).toString(16).padStart(8, "0")} (INVALID)`);
+            console.log(`  Last valid step: ${lastValidStep}, EIP: 0x${(lastValidEIP >>> 0).toString(16).padStart(8, "0")} in ${lastValidRegion}`);
+            console.log(`  State: ${cpu.toString()}`);
+
+            // Dump bytes at current EIP
+            const bytes: string[] = [];
+            for (let i = 0; i < 16; i++) {
+                bytes.push(cpu.memory.read8(cpu.eip + i).toString(16).padStart(2, "0"));
+            }
+            console.log(`  Bytes at EIP: ${bytes.join(" ")}`);
+
+            // Continue for a few more steps to see the pattern, then stop
+            const extraSteps = 20;
+            for (let i = 0; i < extraSteps && !cpu.halted; i++) {
+                cpu.step();
+                stepCount++;
+            }
+            break;
+        }
+    }
+    if (stepCount >= maxSteps) {
+        console.log(`Execution limit reached (${maxSteps} steps)`);
+    }
 } catch (err: any) {
     console.log(`\n[ERROR] ${err.message}`);
     console.log(`State at error: ${cpu.toString()}`);
+    if (detectedRunaway) {
+        console.log(`  (Runaway was detected at step ${lastValidStep + 1})`);
+    }
+}
+
+// Dump stub call log
+console.log(`\n--- Win32 Stub Call Log (last 50) ---`);
+for (const call of win32Stubs.getCallLog()) {
+    console.log(`  ${call}`);
 }
 
 // Dump trace on halt/error
-console.log(`\n--- Instruction Trace (last 20) ---`);
+console.log(`\n--- Instruction Trace (last 200) ---`);
 for (const line of cpu.dumpTrace()) {
     console.log(`  ${line}`);
 }

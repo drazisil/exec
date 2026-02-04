@@ -31,6 +31,14 @@ export class CPU {
     private _stepCount: number;
     private _segmentOverride: "FS" | "GS" | null;
     private _repPrefix: "REP" | "REPNE" | null;
+    private _operandSizeOverride: boolean;
+
+    // x87 FPU state
+    fpuStack: Float64Array;   // 8 x87 registers (80-bit stored as 64-bit doubles)
+    fpuTop: number;           // TOP pointer (0-7), points to current ST(0)
+    fpuStatusWord: number;    // FPU status word (includes C0-C3 condition codes)
+    fpuControlWord: number;   // FPU control word (rounding, precision, exception masks)
+    fpuTagWord: number;       // Tag word: 2 bits per register (00=valid, 11=empty)
 
     constructor(memory: Memory) {
         this.regs = new Uint32Array(8);
@@ -45,6 +53,149 @@ export class CPU {
         this._stepCount = 0;
         this._segmentOverride = null;
         this._repPrefix = null;
+        this._operandSizeOverride = false;
+        // Initialize FPU
+        this.fpuStack = new Float64Array(8);
+        this.fpuTop = 0;
+        this.fpuStatusWord = 0;
+        this.fpuControlWord = 0x037F; // Default: all exceptions masked, double precision, round-nearest
+        this.fpuTagWord = 0xFFFF;     // All registers empty (11 for each)
+    }
+
+    // --- FPU helpers ---
+
+    /** Get ST(i) register value. ST(0) = fpuStack[fpuTop], ST(1) = fpuStack[(fpuTop+1)%8], etc. */
+    fpuGet(i: number): number {
+        return this.fpuStack[(this.fpuTop + i) & 7];
+    }
+
+    /** Set ST(i) register value */
+    fpuSet(i: number, val: number): void {
+        const idx = (this.fpuTop + i) & 7;
+        this.fpuStack[idx] = val;
+        // Mark register as valid (tag = 00)
+        this.fpuTagWord &= ~(3 << (idx * 2));
+    }
+
+    /** Push a value onto the FPU stack (decrement TOP, then write to new ST(0)) */
+    fpuPush(val: number): void {
+        this.fpuTop = (this.fpuTop - 1) & 7;
+        this.fpuStack[this.fpuTop] = val;
+        // Mark new ST(0) as valid
+        this.fpuTagWord &= ~(3 << (this.fpuTop * 2));
+        // Update status word TOP field (bits 13-11)
+        this.fpuStatusWord = (this.fpuStatusWord & ~0x3800) | (this.fpuTop << 11);
+    }
+
+    /** Pop the FPU stack (mark current ST(0) as empty, increment TOP) */
+    fpuPop(): number {
+        const val = this.fpuStack[this.fpuTop];
+        // Mark register as empty (tag = 11)
+        this.fpuTagWord |= (3 << (this.fpuTop * 2));
+        this.fpuTop = (this.fpuTop + 1) & 7;
+        // Update status word TOP field
+        this.fpuStatusWord = (this.fpuStatusWord & ~0x3800) | (this.fpuTop << 11);
+        return val;
+    }
+
+    /** Set FPU condition codes C0-C3 for comparison result */
+    fpuSetCC(c3: boolean, c2: boolean, c0: boolean): void {
+        this.fpuStatusWord &= ~(0x4500); // Clear C3(bit14), C2(bit10), C0(bit8)
+        if (c0) this.fpuStatusWord |= 0x0100; // C0 = bit 8
+        if (c2) this.fpuStatusWord |= 0x0400; // C2 = bit 10
+        if (c3) this.fpuStatusWord |= 0x4000; // C3 = bit 14
+    }
+
+    /** Compare two FPU values and set condition codes */
+    fpuCompare(a: number, b: number): void {
+        if (isNaN(a) || isNaN(b)) {
+            this.fpuSetCC(true, true, true); // Unordered: C3=1, C2=1, C0=1
+        } else if (a > b) {
+            this.fpuSetCC(false, false, false); // ST(0) > src: C3=0, C2=0, C0=0
+        } else if (a < b) {
+            this.fpuSetCC(false, false, true);  // ST(0) < src: C3=0, C2=0, C0=1
+        } else {
+            this.fpuSetCC(true, false, false);  // Equal: C3=1, C2=0, C0=0
+        }
+    }
+
+    /** Read a 64-bit double from memory */
+    readDouble(addr: number): number {
+        const lo = this.memory.read32(addr);
+        const hi = this.memory.read32(addr + 4);
+        const buf = new ArrayBuffer(8);
+        const view = new DataView(buf);
+        view.setUint32(0, lo, true);
+        view.setUint32(4, hi, true);
+        return view.getFloat64(0, true);
+    }
+
+    /** Write a 64-bit double to memory */
+    writeDouble(addr: number, val: number): void {
+        const buf = new ArrayBuffer(8);
+        const view = new DataView(buf);
+        view.setFloat64(0, val, true);
+        this.memory.write32(addr, view.getUint32(0, true));
+        this.memory.write32(addr + 4, view.getUint32(4, true));
+    }
+
+    /** Read a 32-bit float from memory */
+    readFloat(addr: number): number {
+        const raw = this.memory.read32(addr);
+        const buf = new ArrayBuffer(4);
+        const view = new DataView(buf);
+        view.setUint32(0, raw, true);
+        return view.getFloat32(0, true);
+    }
+
+    /** Write a 32-bit float to memory */
+    writeFloat(addr: number, val: number): void {
+        const buf = new ArrayBuffer(4);
+        const view = new DataView(buf);
+        view.setFloat32(0, val, true);
+        this.memory.write32(addr, view.getUint32(0, true));
+    }
+
+    /**
+     * Read an 8-bit register value by ModR/M register index.
+     * 0=AL, 1=CL, 2=DL, 3=BL, 4=AH, 5=CH, 6=DH, 7=BH
+     */
+    readReg8(idx: number): number {
+        if (idx < 4) {
+            return this.regs[idx] & 0xFF;          // AL, CL, DL, BL
+        }
+        return (this.regs[idx - 4] >> 8) & 0xFF;   // AH, CH, DH, BH
+    }
+
+    /**
+     * Write an 8-bit register value by ModR/M register index.
+     * 0=AL, 1=CL, 2=DL, 3=BL, 4=AH, 5=CH, 6=DH, 7=BH
+     */
+    writeReg8(idx: number, val: number): void {
+        if (idx < 4) {
+            this.regs[idx] = (this.regs[idx] & 0xFFFFFF00) | (val & 0xFF);
+        } else {
+            this.regs[idx - 4] = (this.regs[idx - 4] & 0xFFFF00FF) | ((val & 0xFF) << 8);
+        }
+    }
+
+    /** Read 8-bit value from r/m8 (handles register encoding correctly) */
+    readRM8(mod: number, rm: number): number {
+        if (mod === 3) {
+            return this.readReg8(rm);
+        }
+        const resolved = this.resolveRM(mod, rm);
+        return this.memory.read8(this.applySegmentOverride(resolved.addr));
+    }
+
+    /** Write 8-bit value to r/m8 (handles register encoding correctly) */
+    writeRM8(mod: number, rm: number, val: number): void {
+        if (mod === 3) {
+            this.writeReg8(rm, val);
+        } else {
+            const resolved = this.resolveRM(mod, rm);
+            this.memory.write8(this.applySegmentOverride(resolved.addr), val & 0xFF);
+        }
     }
 
     register(opcode: number, handler: OpcodeHandler): void {
@@ -272,6 +423,7 @@ export class CPU {
     private clearPrefixes(): void {
         this._segmentOverride = null;
         this._repPrefix = null;
+        this._operandSizeOverride = false;
     }
 
     readRM32(mod: number, rm: number): number {
@@ -293,10 +445,57 @@ export class CPU {
         }
     }
 
+    /** Read 16- or 32-bit value from r/m depending on operand size prefix */
+    readRMv(mod: number, rm: number): number {
+        const resolved = this.resolveRM(mod, rm);
+        if (this._operandSizeOverride) {
+            if (resolved.isReg) return this.regs[resolved.addr] & 0xFFFF;
+            return this.memory.read16(this.applySegmentOverride(resolved.addr));
+        }
+        if (resolved.isReg) return this.regs[resolved.addr];
+        return this.memory.read32(this.applySegmentOverride(resolved.addr));
+    }
+
+    /** Write 16- or 32-bit value to r/m depending on operand size prefix */
+    writeRMv(mod: number, rm: number, val: number): void {
+        const resolved = this.resolveRM(mod, rm);
+        if (this._operandSizeOverride) {
+            if (resolved.isReg) {
+                this.regs[resolved.addr] = (this.regs[resolved.addr] & 0xFFFF0000) | (val & 0xFFFF);
+            } else {
+                this.memory.write16(this.applySegmentOverride(resolved.addr), val & 0xFFFF);
+            }
+        } else {
+            if (resolved.isReg) {
+                this.regs[resolved.addr] = val >>> 0;
+            } else {
+                this.memory.write32(this.applySegmentOverride(resolved.addr), val >>> 0);
+            }
+        }
+    }
+
+    /** Fetch 16- or 32-bit immediate depending on operand size prefix */
+    fetchImmediate(): number {
+        return this._operandSizeOverride ? this.fetch16() : this.fetch32();
+    }
+
+    /** Fetch signed 16- or 32-bit immediate depending on operand size prefix */
+    fetchSignedImmediate(): number {
+        if (this._operandSizeOverride) {
+            const val = this.fetch16();
+            return (val & 0x8000) ? val - 0x10000 : val;
+        }
+        return this.fetchSigned32();
+    }
+
     // --- Execution ---
 
     get repPrefix(): "REP" | "REPNE" | null {
         return this._repPrefix;
+    }
+
+    get operandSizeOverride(): boolean {
+        return this._operandSizeOverride;
     }
 
     private skipPrefix(): void {
@@ -313,6 +512,8 @@ export class CPU {
             // Track REP/REPNE prefixes for string instructions
             else if (prefix === 0xF3) this._repPrefix = "REP";
             else if (prefix === 0xF2) this._repPrefix = "REPNE";
+            // Track operand size override
+            else if (prefix === 0x66) this._operandSizeOverride = true;
         }
     }
 
