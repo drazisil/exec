@@ -8,6 +8,7 @@ export function registerAllOpcodes(cpu: CPU): void {
     registerControlFlow(cpu);
     registerGroup5(cpu);
     registerTwoByteOpcodes(cpu);
+    registerStringOps(cpu);
     registerMisc(cpu);
 }
 
@@ -38,14 +39,34 @@ function registerDataMovement(cpu: CPU): void {
     // MOV r/m32, imm32
     cpu.register(0xC7, (cpu) => {
         const { mod, rm } = cpu.decodeModRM();
+        // Must resolve the address FIRST (consuming disp8/disp32 from the instruction
+        // stream) before reading the immediate value that follows.
+        const resolved = cpu.resolveRM(mod, rm);
         const imm = cpu.fetch32();
-        cpu.writeRM32(mod, rm, imm);
+        if (resolved.isReg) {
+            cpu.regs[resolved.addr] = imm >>> 0;
+        } else {
+            const addr = cpu.applySegmentOverride(resolved.addr);
+            cpu.memory.write32(addr, imm >>> 0);
+        }
+    });
+
+    // MOV AL, [disp32] (also handles FS:/GS: segment override)
+    cpu.register(0xA0, (cpu) => {
+        const addr = cpu.applySegmentOverride(cpu.fetch32());
+        cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | cpu.memory.read8(addr);
     });
 
     // MOV EAX, [disp32] (also handles FS:/GS: segment override)
     cpu.register(0xA1, (cpu) => {
         const addr = cpu.applySegmentOverride(cpu.fetch32());
         cpu.regs[REG.EAX] = cpu.memory.read32(addr);
+    });
+
+    // MOV [disp32], AL (also handles FS:/GS: segment override)
+    cpu.register(0xA2, (cpu) => {
+        const addr = cpu.applySegmentOverride(cpu.fetch32());
+        cpu.memory.write8(addr, cpu.regs[REG.EAX] & 0xFF);
     });
 
     // MOV [disp32], EAX (also handles FS:/GS: segment override)
@@ -105,6 +126,50 @@ function registerArithmetic(cpu: CPU): void {
         const result = (op1 - op2) >>> 0;
         cpu.regs[reg] = result;
         cpu.updateFlagsArith(op1 - op2, op1, op2, true);
+    });
+
+    // SBB r/m32, r32 (subtract with borrow)
+    cpu.register(0x19, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.readRM32(mod, rm);
+        const op2 = cpu.regs[reg];
+        const borrow = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 - op2 - borrow) >>> 0;
+        cpu.writeRM32(mod, rm, result);
+        cpu.updateFlagsArith(op1 - op2 - borrow, op1, op2 + borrow, true);
+    });
+
+    // SBB r32, r/m32 (subtract with borrow)
+    cpu.register(0x1B, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.regs[reg];
+        const op2 = cpu.readRM32(mod, rm);
+        const borrow = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 - op2 - borrow) >>> 0;
+        cpu.regs[reg] = result;
+        cpu.updateFlagsArith(op1 - op2 - borrow, op1, op2 + borrow, true);
+    });
+
+    // ADC r/m32, r32 (add with carry)
+    cpu.register(0x11, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.readRM32(mod, rm);
+        const op2 = cpu.regs[reg];
+        const carry = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 + op2 + carry) >>> 0;
+        cpu.writeRM32(mod, rm, result);
+        cpu.updateFlagsArith(op1 + op2 + carry, op1, op2 + carry, false);
+    });
+
+    // ADC r32, r/m32 (add with carry)
+    cpu.register(0x13, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const op1 = cpu.regs[reg];
+        const op2 = cpu.readRM32(mod, rm);
+        const carry = cpu.getFlag(FLAG.CF) ? 1 : 0;
+        const result = (op1 + op2 + carry) >>> 0;
+        cpu.regs[reg] = result;
+        cpu.updateFlagsArith(op1 + op2 + carry, op1, op2 + carry, false);
     });
 
     // CMP r/m32, r32
@@ -343,8 +408,9 @@ function registerArithmetic(cpu: CPU): void {
     // MOV r/m8, imm8 (0xC6 /0)
     cpu.register(0xC6, (cpu) => {
         const { mod, rm } = cpu.decodeModRM();
-        const imm = cpu.fetch8();
+        // Must resolve address FIRST (consuming disp8/disp32) before reading immediate
         const resolved = cpu.resolveRM(mod, rm);
+        const imm = cpu.fetch8();
         if (resolved.isReg) {
             cpu.regs[resolved.addr] = (cpu.regs[resolved.addr] & 0xFFFFFF00) | imm;
         } else {
@@ -481,6 +547,20 @@ function doGroup1(cpu: CPU, mod: number, rm: number, opExt: number, op1: number,
             const result = (op1 | op2) >>> 0;
             cpu.writeRM32(mod, rm, result);
             cpu.updateFlagsLogic(result);
+            break;
+        }
+        case 2: { // ADC (add with carry)
+            const carry = cpu.getFlag(FLAG.CF) ? 1 : 0;
+            const result = (op1 + op2 + carry) >>> 0;
+            cpu.writeRM32(mod, rm, result);
+            cpu.updateFlagsArith(op1 + op2 + carry, op1, op2 + carry, false);
+            break;
+        }
+        case 3: { // SBB (subtract with borrow)
+            const borrow = cpu.getFlag(FLAG.CF) ? 1 : 0;
+            const result = (op1 - op2 - borrow) >>> 0;
+            cpu.writeRM32(mod, rm, result);
+            cpu.updateFlagsArith(op1 - op2 - borrow, op1, op2 + borrow, true);
             break;
         }
         case 4: { // AND
@@ -703,12 +783,22 @@ function registerLogic(cpu: CPU): void {
         cpu.regs[REG.EAX] = result;
     });
 
-    // 0x0C: AND EAX, imm8 (zero-extended to 32-bit)
+    // 0x0C: OR AL, imm8
     cpu.register(0x0C, (cpu) => {
         const imm = cpu.fetch8();
-        const result = (cpu.regs[REG.EAX] & imm) >>> 0;
+        const al = cpu.regs[REG.EAX] & 0xFF;
+        const result = al | imm;
+        cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | result;
         cpu.updateFlagsLogic(result);
-        cpu.regs[REG.EAX] = result;
+    });
+
+    // 0x24: AND AL, imm8
+    cpu.register(0x24, (cpu) => {
+        const imm = cpu.fetch8();
+        const al = cpu.regs[REG.EAX] & 0xFF;
+        const result = al & imm;
+        cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | result;
+        cpu.updateFlagsLogic(result);
     });
 
     // 0x0D: OR EAX, imm32
@@ -1103,6 +1193,235 @@ function evaluateCondition(cpu: CPU, cond: number): boolean {
 }
 
 // ============================================================
+// String Operations (STOS, MOVS, LODS, SCAS, CMPS)
+// ============================================================
+
+function registerStringOps(cpu: CPU): void {
+    // Direction flag helper: returns +1 (DF=0, forward) or -1 (DF=1, backward)
+    const direction = (cpu: CPU): number => cpu.getFlag(FLAG.DF) ? -1 : 1;
+
+    // STOSB — store AL to [EDI], advance EDI by 1
+    cpu.register(0xAA, (cpu) => {
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                cpu.memory.write8(cpu.regs[REG.EDI], cpu.regs[REG.EAX] & 0xFF);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            cpu.memory.write8(cpu.regs[REG.EDI], cpu.regs[REG.EAX] & 0xFF);
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+        }
+    });
+
+    // STOSD — store EAX to [EDI], advance EDI by 4
+    cpu.register(0xAB, (cpu) => {
+        const dir4 = direction(cpu) * 4;
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                cpu.memory.write32(cpu.regs[REG.EDI], cpu.regs[REG.EAX]);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            cpu.memory.write32(cpu.regs[REG.EDI], cpu.regs[REG.EAX]);
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+        }
+    });
+
+    // MOVSB — copy byte [ESI] to [EDI], advance both by 1
+    cpu.register(0xA4, (cpu) => {
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                cpu.memory.write8(cpu.regs[REG.EDI], cpu.memory.read8(cpu.regs[REG.ESI]));
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            cpu.memory.write8(cpu.regs[REG.EDI], cpu.memory.read8(cpu.regs[REG.ESI]));
+            cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + direction(cpu)) >>> 0;
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+        }
+    });
+
+    // MOVSD — copy dword [ESI] to [EDI], advance both by 4
+    cpu.register(0xA5, (cpu) => {
+        const dir4 = direction(cpu) * 4;
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                cpu.memory.write32(cpu.regs[REG.EDI], cpu.memory.read32(cpu.regs[REG.ESI]));
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            cpu.memory.write32(cpu.regs[REG.EDI], cpu.memory.read32(cpu.regs[REG.ESI]));
+            cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+        }
+    });
+
+    // LODSB — load byte [ESI] into AL, advance ESI by 1
+    cpu.register(0xAC, (cpu) => {
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | cpu.memory.read8(cpu.regs[REG.ESI]);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | cpu.memory.read8(cpu.regs[REG.ESI]);
+            cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + direction(cpu)) >>> 0;
+        }
+    });
+
+    // LODSD — load dword [ESI] into EAX, advance ESI by 4
+    cpu.register(0xAD, (cpu) => {
+        const dir4 = direction(cpu) * 4;
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                cpu.regs[REG.EAX] = cpu.memory.read32(cpu.regs[REG.ESI]);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            cpu.regs[REG.EAX] = cpu.memory.read32(cpu.regs[REG.ESI]);
+            cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
+        }
+    });
+
+    // SCASB — compare AL with [EDI], advance EDI by 1
+    cpu.register(0xAE, (cpu) => {
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            // REPE SCASB: scan while equal (ZF=1), stop on mismatch or ECX=0
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const val = cpu.memory.read8(cpu.regs[REG.EDI]);
+                const al = cpu.regs[REG.EAX] & 0xFF;
+                cpu.updateFlagsArith(al - val, al, val, true);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (!cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else if (rep === "REPNE") {
+            // REPNE SCASB: scan while not equal (ZF=0), stop on match or ECX=0
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const val = cpu.memory.read8(cpu.regs[REG.EDI]);
+                const al = cpu.regs[REG.EAX] & 0xFF;
+                cpu.updateFlagsArith(al - val, al, val, true);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else {
+            const val = cpu.memory.read8(cpu.regs[REG.EDI]);
+            const al = cpu.regs[REG.EAX] & 0xFF;
+            cpu.updateFlagsArith(al - val, al, val, true);
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+        }
+    });
+
+    // SCASD — compare EAX with [EDI], advance EDI by 4
+    cpu.register(0xAF, (cpu) => {
+        const dir4 = direction(cpu) * 4;
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const val = cpu.memory.read32(cpu.regs[REG.EDI]);
+                cpu.updateFlagsArith((cpu.regs[REG.EAX] | 0) - (val | 0), cpu.regs[REG.EAX], val, true);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (!cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else if (rep === "REPNE") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const val = cpu.memory.read32(cpu.regs[REG.EDI]);
+                cpu.updateFlagsArith((cpu.regs[REG.EAX] | 0) - (val | 0), cpu.regs[REG.EAX], val, true);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else {
+            const val = cpu.memory.read32(cpu.regs[REG.EDI]);
+            cpu.updateFlagsArith((cpu.regs[REG.EAX] | 0) - (val | 0), cpu.regs[REG.EAX], val, true);
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+        }
+    });
+
+    // CMPSB — compare [ESI] with [EDI], advance both by 1
+    cpu.register(0xA6, (cpu) => {
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const src = cpu.memory.read8(cpu.regs[REG.ESI]);
+                const dst = cpu.memory.read8(cpu.regs[REG.EDI]);
+                cpu.updateFlagsArith(src - dst, src, dst, true);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (!cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else if (rep === "REPNE") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const src = cpu.memory.read8(cpu.regs[REG.ESI]);
+                const dst = cpu.memory.read8(cpu.regs[REG.EDI]);
+                cpu.updateFlagsArith(src - dst, src, dst, true);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else {
+            const src = cpu.memory.read8(cpu.regs[REG.ESI]);
+            const dst = cpu.memory.read8(cpu.regs[REG.EDI]);
+            cpu.updateFlagsArith(src - dst, src, dst, true);
+            cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + direction(cpu)) >>> 0;
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + direction(cpu)) >>> 0;
+        }
+    });
+
+    // CMPSD — compare [ESI] dword with [EDI] dword, advance both by 4
+    cpu.register(0xA7, (cpu) => {
+        const dir4 = direction(cpu) * 4;
+        const rep = cpu.repPrefix;
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const src = cpu.memory.read32(cpu.regs[REG.ESI]);
+                const dst = cpu.memory.read32(cpu.regs[REG.EDI]);
+                cpu.updateFlagsArith((src | 0) - (dst | 0), src, dst, true);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (!cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else if (rep === "REPNE") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const src = cpu.memory.read32(cpu.regs[REG.ESI]);
+                const dst = cpu.memory.read32(cpu.regs[REG.EDI]);
+                cpu.updateFlagsArith((src | 0) - (dst | 0), src, dst, true);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+                if (cpu.getFlag(FLAG.ZF)) break;
+            }
+        } else {
+            const src = cpu.memory.read32(cpu.regs[REG.ESI]);
+            const dst = cpu.memory.read32(cpu.regs[REG.EDI]);
+            cpu.updateFlagsArith((src | 0) - (dst | 0), src, dst, true);
+            cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
+            cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+        }
+    });
+}
+
+// ============================================================
 // Misc
 // ============================================================
 
@@ -1113,6 +1432,16 @@ function registerMisc(cpu: CPU): void {
     // HLT
     cpu.register(0xF4, (cpu) => {
         cpu.halted = true;
+    });
+
+    // CLD — clear direction flag (DF=0, string ops go forward)
+    cpu.register(0xFC, (cpu) => {
+        cpu.setFlag(FLAG.DF, false);
+    });
+
+    // STD — set direction flag (DF=1, string ops go backward)
+    cpu.register(0xFD, (cpu) => {
+        cpu.setFlag(FLAG.DF, true);
     });
 
     // INT imm8

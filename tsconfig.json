@@ -14,12 +14,21 @@
     "declaration": true,
     "sourceMap": true,
     "noEmit": false,
-    "rewriteRelativeImportExtensions": true
+    "rewriteRelativeImportExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "#hardware/*": ["src/hardware/*"],
+      "#emulator/*": ["src/emulator/*"],
+      "#kernel/*": ["src/kernel/*"],
+      "#loader/*": ["src/loader/*"]
+    }
   },
   "include": [
     "electron-main.ts",
     "electron-preload.ts",
     "run-exe.ts",
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts"
   ]
 }

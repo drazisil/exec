@@ -105,6 +105,12 @@ export class ImportResolver {
         }
 
         console.log(`[ImportResolver] IAT written: ${stubCount} stubs, ${realCount} real DLL, ${unresolvedCount} unresolved`);
+
+        // Also patch all loaded DLLs' IAT entries to use stubs where available
+        // This prevents DLL→DLL calls from entering real DLL code
+        if (win32Stubs) {
+            this._dllLoader.patchDLLIATs(memory, win32Stubs);
+        }
     }
 
     /**
