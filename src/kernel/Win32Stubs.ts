@@ -47,7 +47,7 @@ export class Win32Stubs {
     private _memory: Memory;
     private _installed = false;
     private _callLog: string[] = [];
-    private _callLogSize = 50;
+    private _callLogSize = 2000;
 
     constructor(memory: Memory) {
         this._memory = memory;
@@ -176,10 +176,19 @@ export class Win32Stubs {
             throw new Error(`Unknown Win32 stub at 0x${stubAddr.toString(16)}`);
         }
 
-        // Log the stub call
-        this._callLog.push(`${entry.name} @ 0x${stubAddr.toString(16)}`);
-        if (this._callLog.length > this._callLogSize) {
-            this._callLog.shift();
+        // Log the stub call (deduplicate consecutive identical calls)
+        const logEntry = `${entry.name} @ 0x${stubAddr.toString(16)}`;
+        if (this._callLog.length > 0 && this._callLog[this._callLog.length - 1].startsWith(logEntry)) {
+            // Increment count on existing entry
+            const last = this._callLog[this._callLog.length - 1];
+            const countMatch = last.match(/ x(\d+)$/);
+            const count = countMatch ? parseInt(countMatch[1]) + 1 : 2;
+            this._callLog[this._callLog.length - 1] = `${logEntry} x${count}`;
+        } else {
+            this._callLog.push(logEntry);
+            if (this._callLog.length > this._callLogSize) {
+                this._callLog.shift();
+            }
         }
 
         // Execute the JS handler
@@ -982,6 +991,378 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         const code = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
         console.log(`\n[Win32] RaiseException(code=0x${code.toString(16)})`);
         cleanupStdcall(cpu, memory, 16);
+    });
+
+    // =============== Threading ===============
+
+    // CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T dwStackSize, LPTHREAD_START_ROUTINE lpStartAddress,
+    //              LPVOID lpParameter, DWORD dwCreationFlags, LPDWORD lpThreadId) -> HANDLE
+    stubs.registerStub("kernel32.dll", "CreateThread", (cpu) => {
+        const lpStartAddress = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const dwCreationFlags = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        const lpThreadId = memory.read32((cpu.regs[REG.ESP] + 24) >>> 0);
+        console.log(`  [Win32] CreateThread(startAddr=0x${lpStartAddress.toString(16)}, flags=0x${dwCreationFlags.toString(16)})`);
+        // Write a fake thread ID
+        if (lpThreadId !== 0) {
+            memory.write32(lpThreadId, 1001); // fake thread ID
+        }
+        cpu.regs[REG.EAX] = 0x0000BEEF; // fake thread handle (non-null = success)
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // ResumeThread(HANDLE hThread) -> DWORD (previous suspend count)
+    stubs.registerStub("kernel32.dll", "ResumeThread", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // previous suspend count was 1
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // ExitThread(DWORD dwExitCode) -> void (noreturn)
+    stubs.registerStub("kernel32.dll", "ExitThread", (cpu) => {
+        const exitCode = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        console.log(`  [Win32] ExitThread(${exitCode})`);
+        // For now just return - in a real implementation this would terminate the thread
+    });
+
+    // GetExitCodeThread(HANDLE hThread, LPDWORD lpExitCode) -> BOOL
+    stubs.registerStub("kernel32.dll", "GetExitCodeThread", (cpu) => {
+        const lpExitCode = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        if (lpExitCode !== 0) {
+            memory.write32(lpExitCode, 0); // STILL_ACTIVE = 259, or 0 for exited
+        }
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SuspendThread(HANDLE hThread) -> DWORD
+    stubs.registerStub("kernel32.dll", "SuspendThread", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // previous suspend count
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) -> DWORD
+    stubs.registerStub("kernel32.dll", "WaitForSingleObject", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // WAIT_OBJECT_0 (signaled immediately)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitAll, DWORD dwMilliseconds) -> DWORD
+    stubs.registerStub("kernel32.dll", "WaitForMultipleObjects", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // WAIT_OBJECT_0
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // Sleep(DWORD dwMilliseconds) -> void
+    let sleepCount = 0;
+    stubs.registerStub("kernel32.dll", "Sleep", (cpu) => {
+        sleepCount++;
+        if (sleepCount === 1) {
+            console.log(`  [Win32] Sleep() first call`);
+        }
+        if (sleepCount >= 5) {
+            console.log(`\n[Win32] Sleep() called ${sleepCount} times - game appears stuck in a wait loop`);
+            console.log(`  This likely means the game is waiting for a thread we created but didn't run.`);
+            cpu.halted = true;
+            return;
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // =============== Synchronization ===============
+
+    // CreateMutexA(LPSECURITY_ATTRIBUTES, BOOL bInitialOwner, LPCSTR lpName) -> HANDLE
+    stubs.registerStub("kernel32.dll", "CreateMutexA", (cpu) => {
+        cpu.regs[REG.EAX] = 0x0000CAFE; // fake mutex handle
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // OpenMutexA(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName) -> HANDLE
+    stubs.registerStub("kernel32.dll", "OpenMutexA", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // NULL = doesn't exist
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // ReleaseMutex(HANDLE hMutex) -> BOOL
+    stubs.registerStub("kernel32.dll", "ReleaseMutex", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // CreateEventA(LPSECURITY_ATTRIBUTES, BOOL bManualReset, BOOL bInitialState, LPCSTR lpName) -> HANDLE
+    stubs.registerStub("kernel32.dll", "CreateEventA", (cpu) => {
+        cpu.regs[REG.EAX] = 0x0000DEAD; // fake event handle
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // SetEvent(HANDLE hEvent) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetEvent", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // ResetEvent(HANDLE hEvent) -> BOOL
+    stubs.registerStub("kernel32.dll", "ResetEvent", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // CloseHandle(HANDLE hObject) -> BOOL
+    stubs.registerStub("kernel32.dll", "CloseHandle", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // =============== Error handling ===============
+
+    // GetLastError() -> DWORD
+    stubs.registerStub("kernel32.dll", "GetLastError", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // ERROR_SUCCESS
+    });
+
+    // SetLastError(DWORD dwErrCode) -> void
+    stubs.registerStub("kernel32.dll", "SetLastError", (cpu) => {
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // =============== File I/O ===============
+
+    // CreateFileA(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) -> HANDLE
+    stubs.registerStub("kernel32.dll", "CreateFileA", (cpu) => {
+        const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        let name = "";
+        for (let i = 0; i < 260; i++) { const ch = memory.read8(namePtr + i); if (ch === 0) break; name += String.fromCharCode(ch); }
+        console.log(`  [Win32] CreateFileA("${name}")`);
+        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE (file not found)
+        cleanupStdcall(cpu, memory, 28);
+    });
+
+    // CreateFileW(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) -> HANDLE
+    stubs.registerStub("kernel32.dll", "CreateFileW", (cpu) => {
+        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
+        cleanupStdcall(cpu, memory, 28);
+    });
+
+    // ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED) -> BOOL
+    stubs.registerStub("kernel32.dll", "ReadFile", (cpu) => {
+        const lpBytesRead = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        if (lpBytesRead !== 0) memory.write32(lpBytesRead, 0);
+        cpu.regs[REG.EAX] = 0; // FALSE (failed)
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // GetFileAttributesA(LPCSTR lpFileName) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetFileAttributesA", (cpu) => {
+        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_FILE_ATTRIBUTES (not found)
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetFullPathNameA(LPCSTR, DWORD, LPSTR, LPSTR*) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetFullPathNameA", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // 0 = failure
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // =============== Directory ===============
+
+    // GetCurrentDirectoryA(DWORD nBufferLength, LPSTR lpBuffer) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetCurrentDirectoryA", (cpu) => {
+        const nBufLen = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpBuf = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const dir = "C:\\MCity";
+        if (lpBuf !== 0 && nBufLen > dir.length) {
+            for (let i = 0; i < dir.length; i++) memory.write8(lpBuf + i, dir.charCodeAt(i));
+            memory.write8(lpBuf + dir.length, 0);
+        }
+        cpu.regs[REG.EAX] = dir.length;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetCurrentDirectoryA(LPCSTR lpPathName) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetCurrentDirectoryA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetWindowsDirectoryA(LPSTR lpBuffer, UINT uSize) -> UINT
+    stubs.registerStub("kernel32.dll", "GetWindowsDirectoryA", (cpu) => {
+        const lpBuf = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const uSize = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const dir = "C:\\WINDOWS";
+        if (lpBuf !== 0 && uSize > dir.length) {
+            for (let i = 0; i < dir.length; i++) memory.write8(lpBuf + i, dir.charCodeAt(i));
+            memory.write8(lpBuf + dir.length, 0);
+        }
+        cpu.regs[REG.EAX] = dir.length;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetDiskFreeSpaceA(LPCSTR, LPDWORD, LPDWORD, LPDWORD, LPDWORD) -> BOOL
+    stubs.registerStub("kernel32.dll", "GetDiskFreeSpaceA", (cpu) => {
+        const lpSectorsPerCluster = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const lpBytesPerSector = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const lpFreeClusters = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        const lpTotalClusters = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        if (lpSectorsPerCluster) memory.write32(lpSectorsPerCluster, 8);
+        if (lpBytesPerSector) memory.write32(lpBytesPerSector, 512);
+        if (lpFreeClusters) memory.write32(lpFreeClusters, 1000000);
+        if (lpTotalClusters) memory.write32(lpTotalClusters, 2000000);
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // GetDriveTypeA(LPCSTR lpRootPathName) -> UINT
+    stubs.registerStub("kernel32.dll", "GetDriveTypeA", (cpu) => {
+        cpu.regs[REG.EAX] = 3; // DRIVE_FIXED
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // =============== Time ===============
+
+    // GetLocalTime(LPSYSTEMTIME lpSystemTime) -> void
+    stubs.registerStub("kernel32.dll", "GetLocalTime", (cpu) => {
+        const lp = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        // SYSTEMTIME: wYear(2), wMonth(2), wDayOfWeek(2), wDay(2), wHour(2), wMinute(2), wSecond(2), wMilliseconds(2)
+        memory.write16(lp, 2003);     // year
+        memory.write16(lp + 2, 6);    // month (June)
+        memory.write16(lp + 4, 2);    // day of week (Tuesday)
+        memory.write16(lp + 6, 28);   // day
+        memory.write16(lp + 8, 12);   // hour
+        memory.write16(lp + 10, 0);   // minute
+        memory.write16(lp + 12, 0);   // second
+        memory.write16(lp + 14, 0);   // ms
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetSystemTime(LPSYSTEMTIME lpSystemTime) -> void
+    stubs.registerStub("kernel32.dll", "GetSystemTime", (cpu) => {
+        const lp = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        memory.write16(lp, 2003);
+        memory.write16(lp + 2, 6);
+        memory.write16(lp + 4, 2);
+        memory.write16(lp + 6, 28);
+        memory.write16(lp + 8, 17);   // UTC hour
+        memory.write16(lp + 10, 0);
+        memory.write16(lp + 12, 0);
+        memory.write16(lp + 14, 0);
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetTickCount() -> DWORD
+    stubs.registerStub("kernel32.dll", "GetTickCount", (cpu) => {
+        cpu.regs[REG.EAX] = 100000; // fake tick count
+    });
+
+    // QueryPerformanceCounter(LARGE_INTEGER *lpPerformanceCount) -> BOOL
+    stubs.registerStub("kernel32.dll", "QueryPerformanceCounter", (cpu) => {
+        const lp = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (lp !== 0) {
+            memory.write32(lp, 1000000);     // low dword
+            memory.write32(lp + 4, 0);       // high dword
+        }
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // QueryPerformanceFrequency(LARGE_INTEGER *lpFrequency) -> BOOL
+    stubs.registerStub("kernel32.dll", "QueryPerformanceFrequency", (cpu) => {
+        const lp = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (lp !== 0) {
+            memory.write32(lp, 3579545);     // ~3.58 MHz (typical)
+            memory.write32(lp + 4, 0);
+        }
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetTimeZoneInformation(LPTIME_ZONE_INFORMATION) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetTimeZoneInformation", (cpu) => {
+        const lp = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        // Zero out the structure (172 bytes)
+        for (let i = 0; i < 172; i++) memory.write8(lp + i, 0);
+        memory.write32(lp, 300); // Bias = 300 minutes (EST = UTC-5)
+        cpu.regs[REG.EAX] = 1; // TIME_ZONE_ID_STANDARD
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // FileTimeToLocalFileTime(const FILETIME*, LPFILETIME) -> BOOL
+    stubs.registerStub("kernel32.dll", "FileTimeToLocalFileTime", (cpu) => {
+        const lpIn = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpOut = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        // Just copy input to output (ignore timezone)
+        memory.write32(lpOut, memory.read32(lpIn));
+        memory.write32(lpOut + 4, memory.read32(lpIn + 4));
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // FileTimeToSystemTime(const FILETIME*, LPSYSTEMTIME) -> BOOL
+    stubs.registerStub("kernel32.dll", "FileTimeToSystemTime", (cpu) => {
+        const lpST = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        // Write a reasonable date
+        memory.write16(lpST, 2003);
+        memory.write16(lpST + 2, 6);
+        memory.write16(lpST + 4, 2);
+        memory.write16(lpST + 6, 28);
+        memory.write16(lpST + 8, 12);
+        memory.write16(lpST + 10, 0);
+        memory.write16(lpST + 12, 0);
+        memory.write16(lpST + 14, 0);
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // =============== Misc ===============
+
+    // FormatMessageA(...) -> DWORD
+    stubs.registerStub("kernel32.dll", "FormatMessageA", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // 0 chars written (failure)
+        cleanupStdcall(cpu, memory, 28);
+    });
+
+    // GetProcessHeap() -> HANDLE
+    stubs.registerStub("kernel32.dll", "GetProcessHeap", (cpu) => {
+        cpu.regs[REG.EAX] = 0x00010000; // fake heap handle (same as HeapCreate returns)
+    });
+
+    // GlobalGetAtomNameA(ATOM, LPSTR, int) -> UINT
+    stubs.registerStub("kernel32.dll", "GlobalGetAtomNameA", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // failure
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // GlobalDeleteAtom(ATOM) -> ATOM
+    stubs.registerStub("kernel32.dll", "GlobalDeleteAtom", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // DeviceIoControl(...) -> BOOL
+    stubs.registerStub("kernel32.dll", "DeviceIoControl", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // FALSE (failed)
+        cleanupStdcall(cpu, memory, 32);
+    });
+
+    // WinExec(LPCSTR lpCmdLine, UINT uCmdShow) -> UINT
+    stubs.registerStub("kernel32.dll", "WinExec", (cpu) => {
+        cpu.regs[REG.EAX] = 31; // ERROR_FILE_NOT_FOUND (> 31 = success)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // _lopen(LPCSTR lpPathName, int iReadWrite) -> HFILE
+    stubs.registerStub("kernel32.dll", "_lopen", (cpu) => {
+        cpu.regs[REG.EAX] = 0xFFFFFFFF; // HFILE_ERROR
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // _lclose(HFILE hFile) -> HFILE
+    stubs.registerStub("kernel32.dll", "_lclose", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // WritePrivateProfileSectionA(LPCSTR, LPCSTR, LPCSTR) -> BOOL
+    stubs.registerStub("kernel32.dll", "WritePrivateProfileSectionA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 12);
     });
 
     // InterlockedIncrement(LONG volatile *Addend) -> LONG
