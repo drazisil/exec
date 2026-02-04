@@ -5,12 +5,20 @@
   "main": "./dist/electron-main.js",
   "homepage": "./",
   "type": "module",
+  "imports": {
+    "#hardware/*": "./src/hardware/*",
+    "#emulator/*": "./src/emulator/*",
+    "#kernel/*": "./src/kernel/*",
+    "#loader/*": "./src/loader/*"
+  },
   "scripts": {
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
     "build": "tsc",
-    "run": "node --experimental-strip-types run-exe.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "run": "node run-exe.ts",
+    "test": "node --test --test-reporter spec 'tests/**/*.test.ts'",
+    "test:watch": "node --test --watch 'tests/**/*.test.ts'",
+    "test:coverage": "node --test --test-coverage 'tests/**/*.test.ts'"
   },
   "keywords": [
     "emulator",
@@ -21,9 +29,7 @@
   "license": "ISC",
   "devDependencies": {
     "@types/node": "25.1.0",
-    "typescript": "5.9.3",
-    "electron": "^31.0.0"
-  },
-  "dependencies": {
+    "electron": "^31.0.0",
+    "typescript": "5.9.3"
   }
 }
