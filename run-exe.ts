@@ -162,8 +162,8 @@ for (const mapping of exe.importResolver.getAddressMappings()) {
     console.log(`  0x${mapping.baseAddress.toString(16).padStart(8,'0')}-0x${mapping.endAddress.toString(16).padStart(8,'0')} ${mapping.dllName}`);
 }
 
-// Stub region
-validRanges.push([0x00200000, 0x00202000, "stubs"]);
+// Stub region: MAX_STUBS (4096) × STUB_SIZE (32) = 0x20000 bytes from STUB_BASE
+validRanges.push([0x00200000, 0x00220000, "stubs"]);
 // Sentinel HLT address
 validRanges.push([SENTINEL_ADDR, SENTINEL_ADDR + 1, "sentinel-hlt"]);
 // Thread sentinel address
