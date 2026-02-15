@@ -19,8 +19,26 @@
 import type { CPU } from "../hardware/CPU.ts";
 import { REG } from "../hardware/CPU.ts";
 import type { Memory } from "../hardware/Memory.ts";
-import { readFileSync } from "fs";
-import { join } from "path";
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from "fs";
+import { join, dirname, basename } from "path";
+
+/**
+ * Case-insensitive file lookup for Linux (Windows paths are case-insensitive).
+ * Returns the real on-disk path if found (any case), or null if not found.
+ */
+function findFileCI(linuxPath: string): string | null {
+    if (existsSync(linuxPath)) return linuxPath; // exact match fast path
+    const dir = dirname(linuxPath);
+    const name = basename(linuxPath).toLowerCase();
+    try {
+        const entries = readdirSync(dir);
+        const match = entries.find(e => e.toLowerCase() === name);
+        if (match) return join(dir, match);
+    } catch {
+        // directory doesn't exist or can't be read
+    }
+    return null;
+}
 
 // Registry value type used by stub handlers
 type RegistryEntry = { type: number; value: string | number };
@@ -54,6 +72,45 @@ function loadRegistryJson(): RegistryMap {
         return {};
     }
 }
+
+// ── Emulator config (emulator.json) ──────────────────────────────────────────
+
+type EmulatorConfig = {
+    /** Windows path prefix → Linux path prefix (e.g. "C:\\" → "/home/user/mco/") */
+    pathMappings: Record<string, string>;
+    /** When true, pause and prompt the user when a requested file is not found */
+    interactiveOnMissingFile: boolean;
+};
+
+/**
+ * Load emulator.json from the project root. Returns safe defaults on error.
+ * pathMappings keys are normalised to use "/" and lower-cased for matching.
+ */
+function loadEmulatorConfig(): EmulatorConfig {
+    try {
+        const filePath = join(process.cwd(), "emulator.json");
+        const raw = readFileSync(filePath, "utf8");
+        const data = JSON.parse(raw) as Record<string, unknown>;
+        // Build mappings, skip keys starting with "_"
+        const raw_mappings = (data["pathMappings"] ?? {}) as Record<string, string>;
+        const pathMappings: Record<string, string> = {};
+        for (const [win, linux] of Object.entries(raw_mappings)) {
+            if (win.startsWith("_")) continue;
+            // Normalise: backslashes → forward slash, lowercase
+            pathMappings[win.replace(/\\/g, "/").toLowerCase()] = linux;
+        }
+        const interactive = data["interactiveOnMissingFile"] === true;
+        console.log(`[EmulatorConfig] Loaded ${Object.keys(pathMappings).length} path mapping(s) from emulator.json`);
+        return { pathMappings, interactiveOnMissingFile: interactive };
+    } catch (e: any) {
+        console.warn(`[EmulatorConfig] Could not load emulator.json: ${e.message} — using defaults`);
+        return { pathMappings: {}, interactiveOnMissingFile: false };
+    }
+}
+
+const emulatorConfig = loadEmulatorConfig();
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Stub region: 0x00200000 - 0x002FFFFF (1MB reserved)
 const STUB_BASE = 0x00200000;
@@ -693,19 +750,55 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     });
 
     // LoadLibraryA(LPCSTR lpLibFileName) -> HMODULE
+    // For DLL names with a path component, checks the filesystem via translateWindowsPath
+    // and prompts if the file is missing (respects interactiveOnMissingFile).
     stubs.registerStub("kernel32.dll", "LoadLibraryA", (cpu) => {
         const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
-        let name = "";
-        for (let i = 0; i < 260; i++) {
-            const ch = memory.read8(namePtr + i);
-            if (ch === 0) break;
-            name += String.fromCharCode(ch);
+        let name = readCString(namePtr);
+
+        // Drive-relative paths (\foo\bar.dll) — treat as C:\foo\bar.dll
+        if ((name.startsWith("\\") || name.startsWith("/")) && !/^[a-zA-Z]:/.test(name)) {
+            name = "C:" + name;
         }
+
+        const hasSeparator = name.includes("\\") || name.includes("/");
+        if (hasSeparator) {
+            // Path given — check the filesystem (case-insensitive), prompt if missing
+            let linuxPath = translateWindowsPath(name);
+            while (true) {
+                const realPath = findFileCI(linuxPath);
+                if (realPath !== null) {
+                    console.log(`  [Win32] LoadLibraryA("${name}") -> found`);
+                    const hash = name.toLowerCase().split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0) >>> 0;
+                    cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000;
+                    cleanupStdcall(cpu, memory, 4);
+                    return;
+                }
+                if (!emulatorConfig.interactiveOnMissingFile) {
+                    console.log(`  [Win32] LoadLibraryA("${name}") -> NULL (not found: ${linuxPath})`);
+                    cpu.regs[REG.EAX] = 0; // NULL = failure
+                    cleanupStdcall(cpu, memory, 4);
+                    return;
+                }
+                process.stdout.write(`\n[LoadLibrary] DLL not found: ${linuxPath}\n`);
+                process.stdout.write(`  Add the file then press Enter to retry, or type 'c' to continue without it.\n`);
+                process.stdout.write(`  > `);
+                const answer = readLineTTY().toLowerCase();
+                if (answer !== "c") {
+                    linuxPath = translateWindowsPath(name);
+                    continue;
+                }
+                console.log(`  [Win32] LoadLibraryA("${name}") -> NULL (user skipped)`);
+                cpu.regs[REG.EAX] = 0;
+                cleanupStdcall(cpu, memory, 4);
+                return;
+            }
+        }
+
+        // Plain DLL name (no path) — return fake module handle for GetProcAddress lookups
         console.log(`  [Win32] LoadLibraryA("${name}")`);
-        // Return fake module handle based on DLL name hash (non-zero = success)
-        // The CRT uses LoadLibraryA to get handles for GetProcAddress calls
         const hash = name.toLowerCase().split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0) >>> 0;
-        cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000; // Ensure non-zero and in valid range
+        cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000;
         cleanupStdcall(cpu, memory, 4);
     });
 
@@ -954,6 +1047,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     let sleepCount = 0;
     let isRunningThread = false;  // true when we're executing a thread's code
     let currentThreadIdx = -1;    // index of currently running thread (-1 = main)
+    let lastScheduledIdx = -1;    // index of thread last given a time slice (round-robin)
     // Sentinel address for thread return detection
     const THREAD_SENTINEL = 0x001FE000;
     memory.write8(THREAD_SENTINEL, 0xCD);   // INT
@@ -976,10 +1070,20 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     stubs.registerStub("kernel32.dll", "Sleep", (cpu) => {
         sleepCount++;
 
-        // Check for pending threads to run
-        const runnableThread = pendingThreads.find(t => !t.suspended && !t.completed);
-        if (runnableThread) {
-            const threadIdx = pendingThreads.indexOf(runnableThread);
+        // Check for pending threads to run (round-robin scheduler)
+        const numThreads = pendingThreads.length;
+        let runnableThread: PendingThread | undefined;
+        let threadIdx = -1;
+        for (let i = 1; i <= numThreads; i++) {
+            const idx = (lastScheduledIdx + i) % numThreads;
+            if (!pendingThreads[idx].suspended && !pendingThreads[idx].completed) {
+                runnableThread = pendingThreads[idx];
+                threadIdx = idx;
+                break;
+            }
+        }
+        if (runnableThread && threadIdx >= 0) {
+            lastScheduledIdx = threadIdx;
             console.log(`  [Scheduler] Main thread Sleep #${sleepCount} - switching to thread ${runnableThread.threadId} (startAddr=0x${runnableThread.startAddress.toString(16)})`);
 
             // Save main thread state
@@ -1069,7 +1173,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
                     // Check for thread runaway: EIP outside valid code regions
                     const eip = cpu.eip >>> 0;
-                    const inStubs = eip >= 0x00200000 && eip < 0x00202000;
+                    const inStubs = eip >= 0x00200000 && eip < 0x00220000;
                     const inExe = eip >= 0x00400000 && eip < 0x02000000;
                     const inDlls = eip >= 0x10000000 && eip < 0x40000000;
                     const inThreadSentinel = eip >= 0x001FE000 && eip < 0x001FE004;
@@ -1144,6 +1248,8 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // CloseHandle(HANDLE hObject) -> BOOL
     stubs.registerStub("kernel32.dll", "CloseHandle", (cpu) => {
+        const hObject = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        fileHandleMap.delete(hObject); // clean up file handles
         cpu.regs[REG.EAX] = 1; // TRUE
         cleanupStdcall(cpu, memory, 4);
     });
@@ -1339,6 +1445,18 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 4);
     });
 
+    // SetThreadPriority(HANDLE hThread, int nPriority) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetThreadPriority", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE (success)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetThreadPriority(HANDLE hThread) -> int
+    stubs.registerStub("kernel32.dll", "GetThreadPriority", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // THREAD_PRIORITY_NORMAL
+        cleanupStdcall(cpu, memory, 4);
+    });
+
     // WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) -> DWORD
     stubs.registerStub("kernel32.dll", "WaitForSingleObject", (cpu) => {
         cpu.regs[REG.EAX] = 0; // WAIT_OBJECT_0 (signaled immediately)
@@ -1411,45 +1529,164 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // =============== File I/O ===============
 
-    // File handle counter for fake handles (starts at 0x5000)
+    // File handle table: maps fake handle → open file state
+    type FileHandleEntry = {
+        path: string;       // Linux path (for logging)
+        data: Buffer;       // File contents (empty Buffer for write-only)
+        position: number;   // Current file position
+        writable: boolean;  // True for write-only handles
+    };
+    const fileHandleMap = new Map<number, FileHandleEntry>();
     let nextFileHandle = 0x5000;
+
+    // Translate a Windows path to a Linux path using emulator.json pathMappings.
+    function translateWindowsPath(winPath: string): string {
+        let p = winPath.replace(/\\/g, "/");
+        // Sort longest-first so more-specific prefixes match before shorter ones
+        const mappings = Object.entries(emulatorConfig.pathMappings)
+            .sort((a, b) => b[0].length - a[0].length);
+        for (const [winPrefix, linuxPrefix] of mappings) {
+            if (p.toLowerCase().startsWith(winPrefix)) {
+                return (linuxPrefix + p.substring(winPrefix.length)).replace(/\/+/g, "/");
+            }
+        }
+        // No mapping matched — return with normalized slashes
+        return p.replace(/\/+/g, "/");
+    }
+
+    // Read one line from the controlling terminal synchronously (blocking).
+    // Returns "c" (skip/continue) if no terminal is available.
+    function readLineTTY(): string {
+        let line = "";
+        const buf = Buffer.alloc(1);
+        let fd = -1;
+        try {
+            fd = openSync("/dev/tty", "r");
+            while (true) {
+                const n = readSync(fd, buf, 0, 1, null);
+                if (n === 0) break; // EOF
+                const ch = buf.toString("ascii", 0, 1);
+                if (ch === "\n") break;
+                line += ch;
+            }
+        } catch {
+            // No controlling terminal (e.g. piped/non-interactive) — default to skip
+            return "c";
+        } finally {
+            if (fd >= 0) closeSync(fd);
+        }
+        return line.trim();
+    }
+
+    // Read a null-terminated ANSI string from memory
+    function readCString(ptr: number, maxLen = 260): string {
+        let s = "";
+        for (let i = 0; i < maxLen; i++) {
+            const ch = memory.read8(ptr + i);
+            if (ch === 0) break;
+            s += String.fromCharCode(ch);
+        }
+        return s;
+    }
+
+    // Read a null-terminated wide (UTF-16LE) string from memory
+    function readWideString(ptr: number, maxLen = 260): string {
+        let s = "";
+        for (let i = 0; i < maxLen; i++) {
+            const lo = memory.read8(ptr + i * 2);
+            const hi = memory.read8(ptr + i * 2 + 1);
+            const code = lo | (hi << 8);
+            if (code === 0) break;
+            s += String.fromCharCode(code);
+        }
+        return s;
+    }
+
+    // Open a file by Windows path; returns a handle or INVALID_HANDLE_VALUE.
+    // When emulatorConfig.interactiveOnMissingFile is true, pauses and prompts
+    // the user to add the missing file and retry, or skip.
+    function openFileHandle(winName: string, writable: boolean): number {
+        const handle = nextFileHandle++;
+        if (writable) {
+            fileHandleMap.set(handle, { path: winName, data: Buffer.alloc(0), position: 0, writable: true });
+            console.log(`  [FileIO] CreateFile("${winName}") -> 0x${handle.toString(16)} [write]`);
+            return handle;
+        }
+        let linuxPath = translateWindowsPath(winName);
+        while (true) {
+            const realPath = findFileCI(linuxPath);
+            if (realPath !== null) {
+                try {
+                    const data = readFileSync(realPath);
+                    fileHandleMap.set(handle, { path: realPath, data, position: 0, writable: false });
+                    console.log(`  [FileIO] CreateFile("${winName}") -> 0x${handle.toString(16)} [read, ${data.length} bytes]`);
+                    return handle;
+                } catch {
+                    console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (read error)`);
+                    return 0xFFFFFFFF;
+                }
+            }
+            if (!emulatorConfig.interactiveOnMissingFile) {
+                console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (not found: ${linuxPath})`);
+                return 0xFFFFFFFF;
+            }
+            // Interactive prompt — pause emulation so user can add the file
+            process.stdout.write(`\n[FileIO] File not found: ${linuxPath}\n`);
+            process.stdout.write(`  Add the file then press Enter to retry, or type 'c' to continue without it.\n`);
+            process.stdout.write(`  > `);
+            const answer = readLineTTY().toLowerCase();
+            if (answer !== "c") {
+                // Re-translate in case the user edited emulator.json
+                linuxPath = translateWindowsPath(winName);
+                continue;
+            }
+            console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (user skipped)`);
+            return 0xFFFFFFFF;
+        }
+    }
 
     // CreateFileA(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) -> HANDLE
     stubs.registerStub("kernel32.dll", "CreateFileA", (cpu) => {
         const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
         const dwDesiredAccess = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
-        let name = "";
-        for (let i = 0; i < 260; i++) { const ch = memory.read8(namePtr + i); if (ch === 0) break; name += String.fromCharCode(ch); }
+        const name = readCString(namePtr);
         const GENERIC_WRITE = 0x40000000;
-        const GENERIC_READ_WRITE = 0xC0000000;
-        if (dwDesiredAccess & GENERIC_WRITE || dwDesiredAccess === GENERIC_READ_WRITE) {
-            const handle = nextFileHandle++;
-            console.log(`  [Win32] CreateFileA("${name}") -> handle 0x${handle.toString(16)}`);
-            cpu.regs[REG.EAX] = handle;
-        } else {
-            console.log(`  [Win32] CreateFileA("${name}") -> INVALID_HANDLE_VALUE (read-only not supported)`);
-            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
-        }
+        const writable = (dwDesiredAccess & GENERIC_WRITE) !== 0;
+        cpu.regs[REG.EAX] = openFileHandle(name, writable);
         cleanupStdcall(cpu, memory, 28);
     });
 
     // CreateFileW(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) -> HANDLE
     stubs.registerStub("kernel32.dll", "CreateFileW", (cpu) => {
+        const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
         const dwDesiredAccess = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const name = readWideString(namePtr);
         const GENERIC_WRITE = 0x40000000;
-        if (dwDesiredAccess & GENERIC_WRITE) {
-            cpu.regs[REG.EAX] = nextFileHandle++;
-        } else {
-            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
-        }
+        const writable = (dwDesiredAccess & GENERIC_WRITE) !== 0;
+        cpu.regs[REG.EAX] = openFileHandle(name, writable);
         cleanupStdcall(cpu, memory, 28);
     });
 
     // ReadFile(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED) -> BOOL
     stubs.registerStub("kernel32.dll", "ReadFile", (cpu) => {
-        const lpBytesRead = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
-        if (lpBytesRead !== 0) memory.write32(lpBytesRead, 0);
-        cpu.regs[REG.EAX] = 0; // FALSE (failed)
+        const hFile         = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpBuffer      = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const nBytesToRead  = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const lpBytesRead   = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        const entry = fileHandleMap.get(hFile);
+        if (!entry || entry.writable) {
+            if (lpBytesRead !== 0) memory.write32(lpBytesRead, 0);
+            cpu.regs[REG.EAX] = 0; // FALSE
+        } else {
+            const available = entry.data.length - entry.position;
+            const toRead = Math.min(nBytesToRead, available);
+            for (let i = 0; i < toRead; i++) {
+                memory.write8(lpBuffer + i, entry.data[entry.position + i]);
+            }
+            entry.position += toRead;
+            if (lpBytesRead !== 0) memory.write32(lpBytesRead, toRead);
+            cpu.regs[REG.EAX] = 1; // TRUE
+        }
         cleanupStdcall(cpu, memory, 20);
     });
 
@@ -1507,13 +1744,40 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // GetFileAttributesA(LPCSTR lpFileName) -> DWORD
     stubs.registerStub("kernel32.dll", "GetFileAttributesA", (cpu) => {
-        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_FILE_ATTRIBUTES (not found)
+        const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const name = readCString(namePtr);
+        const linuxPath = translateWindowsPath(name);
+        const realPath = findFileCI(linuxPath);
+        if (realPath !== null) {
+            try {
+                const st = statSync(realPath);
+                const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+                const FILE_ATTRIBUTE_NORMAL    = 0x80;
+                cpu.regs[REG.EAX] = st.isDirectory() ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+            } catch {
+                cpu.regs[REG.EAX] = 0xFFFFFFFF;
+            }
+        } else {
+            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_FILE_ATTRIBUTES
+        }
         cleanupStdcall(cpu, memory, 4);
     });
 
-    // GetFullPathNameA(LPCSTR, DWORD, LPSTR, LPSTR*) -> DWORD
+    // GetFullPathNameA(LPCSTR lpFileName, DWORD nBufferLength, LPSTR lpBuffer, LPSTR* lpFilePart) -> DWORD
     stubs.registerStub("kernel32.dll", "GetFullPathNameA", (cpu) => {
-        cpu.regs[REG.EAX] = 0; // 0 = failure
+        const lpFileName   = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const nBufferLen   = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const lpBuffer     = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const name = readCString(lpFileName);
+        const linuxPath = translateWindowsPath(name);
+        if (lpBuffer !== 0 && nBufferLen > 0) {
+            const out = linuxPath.substring(0, nBufferLen - 1);
+            for (let i = 0; i < out.length; i++) memory.write8(lpBuffer + i, out.charCodeAt(i));
+            memory.write8(lpBuffer + out.length, 0);
+            cpu.regs[REG.EAX] = out.length;
+        } else {
+            cpu.regs[REG.EAX] = linuxPath.length + 1; // required buffer size
+        }
         cleanupStdcall(cpu, memory, 16);
     });
 
@@ -1982,10 +2246,57 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 28);
     });
 
-    // SetFilePointer(HANDLE, LONG, PLONG, DWORD) -> DWORD
+    // SetFilePointer(HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod) -> DWORD
     stubs.registerStub("kernel32.dll", "SetFilePointer", (cpu) => {
-        cpu.regs[REG.EAX] = 0; // new position = 0
+        const hFile    = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const distance = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0) | 0; // signed
+        // lpDistanceToMoveHigh ignored (no > 4GB files)
+        const method   = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        const FILE_BEGIN   = 0;
+        const FILE_CURRENT = 1;
+        const FILE_END     = 2;
+        const entry = fileHandleMap.get(hFile);
+        if (entry && !entry.writable) {
+            let newPos: number;
+            if (method === FILE_BEGIN)        newPos = distance;
+            else if (method === FILE_CURRENT) newPos = entry.position + distance;
+            else                              newPos = entry.data.length + distance; // FILE_END
+            newPos = Math.max(0, Math.min(newPos, entry.data.length));
+            entry.position = newPos;
+            cpu.regs[REG.EAX] = newPos >>> 0;
+        } else {
+            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_SET_FILE_POINTER
+        }
         cleanupStdcall(cpu, memory, 16);
+    });
+
+    // GetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetFileSize", (cpu) => {
+        const hFile          = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpFileSizeHigh = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const entry = fileHandleMap.get(hFile);
+        if (entry && !entry.writable) {
+            if (lpFileSizeHigh !== 0) memory.write32(lpFileSizeHigh, 0); // high DWORD = 0
+            cpu.regs[REG.EAX] = entry.data.length >>> 0;
+        } else {
+            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_FILE_SIZE
+        }
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetFileSizeEx(HANDLE hFile, PLARGE_INTEGER lpFileSize) -> BOOL
+    stubs.registerStub("kernel32.dll", "GetFileSizeEx", (cpu) => {
+        const hFile       = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpFileSize  = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const entry = fileHandleMap.get(hFile);
+        if (entry && !entry.writable && lpFileSize !== 0) {
+            memory.write32(lpFileSize, entry.data.length >>> 0);
+            memory.write32(lpFileSize + 4, 0);
+            cpu.regs[REG.EAX] = 1; // TRUE
+        } else {
+            cpu.regs[REG.EAX] = 0; // FALSE
+        }
+        cleanupStdcall(cpu, memory, 8);
     });
 
     // FlushFileBuffers(HANDLE hFile) -> BOOL
@@ -2181,8 +2492,8 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // CreateDialogParamA(hInstance, lpTemplateName, hWndParent, lpDialogFunc, dwInitParam) -> HWND
     stubs.registerStub("user32.dll", "CreateDialogParamA", (cpu) => {
-        console.log(`  [Win32] CreateDialogParamA() -> 0`);
-        cpu.regs[REG.EAX] = 0; // NULL (failure)
+        cpu.regs[REG.EAX] = 0xABCE; // fake HWND for the main game dialog
+        console.log(`  [Win32] CreateDialogParamA() -> 0xABCE`);
         cleanupStdcall(cpu, memory, 20);
     });
 
@@ -2358,9 +2669,183 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // SetCursor(HCURSOR hCursor) -> HCURSOR
     stubs.registerStub("user32.dll", "SetCursor", (cpu) => {
-        const prev = cpu.regs[REG.EAX];
         cpu.regs[REG.EAX] = 0x1001;
         cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SendMessageA(HWND, UINT, WPARAM, LPARAM) -> LRESULT
+    stubs.registerStub("user32.dll", "SendMessageA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // SendMessageW(HWND, UINT, WPARAM, LPARAM) -> LRESULT
+    stubs.registerStub("user32.dll", "SendMessageW", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // PostMessageA(HWND, UINT, WPARAM, LPARAM) -> BOOL
+    stubs.registerStub("user32.dll", "PostMessageA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // PostMessageW(HWND, UINT, WPARAM, LPARAM) -> BOOL
+    stubs.registerStub("user32.dll", "PostMessageW", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // GetDlgItem(HWND hDlg, int nIDDlgItem) -> HWND
+    stubs.registerStub("user32.dll", "GetDlgItem", (cpu) => {
+        cpu.regs[REG.EAX] = 0xABCF; // fake child HWND
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetDlgItemTextA(HWND hDlg, int nIDDlgItem, LPCSTR lpString) -> BOOL
+    stubs.registerStub("user32.dll", "SetDlgItemTextA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // GetDlgItemTextA(HWND hDlg, int nIDDlgItem, LPSTR lpString, int nMaxCount) -> UINT
+    stubs.registerStub("user32.dll", "GetDlgItemTextA", (cpu) => {
+        const lpString  = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const nMaxCount = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        if (lpString !== 0 && nMaxCount > 0) memory.write8(lpString, 0); // empty string
+        cpu.regs[REG.EAX] = 0; // 0 chars copied
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // SendDlgItemMessageA(HWND, int, UINT, WPARAM, LPARAM) -> LRESULT
+    stubs.registerStub("user32.dll", "SendDlgItemMessageA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // EnableWindow(HWND hWnd, BOOL bEnable) -> BOOL
+    stubs.registerStub("user32.dll", "EnableWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // was not disabled
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // IsWindow(HWND hWnd) -> BOOL
+    stubs.registerStub("user32.dll", "IsWindow", (cpu) => {
+        const hwnd = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = (hwnd !== 0) ? 1 : 0; // TRUE if non-null
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SetFocus(HWND hWnd) -> HWND (previous focus)
+    stubs.registerStub("user32.dll", "SetFocus", (cpu) => {
+        cpu.regs[REG.EAX] = 0xABCD; // previous focus
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetFocus() -> HWND
+    stubs.registerStub("user32.dll", "GetFocus", (cpu) => {
+        cpu.regs[REG.EAX] = 0xABCE; // fake focused HWND
+        cleanupStdcall(cpu, memory, 0);
+    });
+
+    // SetWindowTextA(HWND hWnd, LPCSTR lpString) -> BOOL
+    stubs.registerStub("user32.dll", "SetWindowTextA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetWindowTextW(HWND hWnd, LPCWSTR lpString) -> BOOL
+    stubs.registerStub("user32.dll", "SetWindowTextW", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetWindowTextA(HWND hWnd, LPSTR lpString, int nMaxCount) -> int
+    stubs.registerStub("user32.dll", "GetWindowTextA", (cpu) => {
+        const lpString  = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const nMaxCount = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        if (lpString !== 0 && nMaxCount > 0) memory.write8(lpString, 0); // empty string
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // DefWindowProcA(HWND, UINT, WPARAM, LPARAM) -> LRESULT
+    stubs.registerStub("user32.dll", "DefWindowProcA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // DefWindowProcW(HWND, UINT, WPARAM, LPARAM) -> LRESULT
+    stubs.registerStub("user32.dll", "DefWindowProcW", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // DefDlgProcA(HWND, UINT, WPARAM, LPARAM) -> LRESULT
+    stubs.registerStub("user32.dll", "DefDlgProcA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // IsDialogMessageA(HWND hDlg, LPMSG lpMsg) -> BOOL
+    stubs.registerStub("user32.dll", "IsDialogMessageA", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // FALSE - not a dialog message
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // CallWindowProcA(WNDPROC, HWND, UINT, WPARAM, LPARAM) -> LRESULT
+    stubs.registerStub("user32.dll", "CallWindowProcA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // SetWindowLongA(HWND, int, LONG) -> LONG (previous value)
+    stubs.registerStub("user32.dll", "SetWindowLongA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // GetWindowLongA(HWND, int) -> LONG
+    stubs.registerStub("user32.dll", "GetWindowLongA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // CheckDlgButton(HWND, int, UINT) -> BOOL
+    stubs.registerStub("user32.dll", "CheckDlgButton", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // IsDlgButtonChecked(HWND, int) -> UINT
+    stubs.registerStub("user32.dll", "IsDlgButtonChecked", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // BST_UNCHECKED
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetDlgItemInt(HWND, int, UINT, BOOL) -> BOOL
+    stubs.registerStub("user32.dll", "SetDlgItemInt", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // GetDlgItemInt(HWND, int, BOOL*, BOOL) -> UINT
+    stubs.registerStub("user32.dll", "GetDlgItemInt", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // InvalidateRect(HWND hWnd, CONST RECT* lpRect, BOOL bErase) -> BOOL
+    stubs.registerStub("user32.dll", "InvalidateRect", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // RedrawWindow(HWND, RECT*, HRGN, UINT) -> BOOL
+    stubs.registerStub("user32.dll", "RedrawWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 16);
     });
 
     // =============== OLEAUT32: BSTR / VARIANT / SafeArray ===============
@@ -2609,6 +3094,69 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 4);
     });
 
+    // ── oleaut32.dll ordinal aliases ─────────────────────────────────────────
+    // MCO imports oleaut32 by ordinal.  Map standard XP-era ordinals (from
+    // Wine oleaut32.spec, which matches the real XP DLL) to existing stubs.
+    // Ordinal #2..#9  = Sys* BSTR functions
+    // Ordinal #27..#31 = Variant* functions
+    // Ordinal #150    = CreateTypeLib (3 args) → return E_NOTIMPL
+
+    function oleOrd(n: number, fn: (cpu: any) => void) {
+        stubs.registerStub("oleaut32.dll", `Ordinal #${n}`, fn);
+    }
+
+    // BSTR
+    oleOrd(2, (cpu) => { // SysAllocString(psz) -> BSTR
+        const psz = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (psz === 0) { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 4); return; }
+        let len = 0;
+        while (memory.read16(psz + len * 2)) len++;
+        const byteLen = len * 2;
+        const addr = (cpu as any).heapAlloc ? (cpu as any).heapAlloc(byteLen + 6) : 0x04800000;
+        if (addr) {
+            memory.write32(addr, byteLen);
+            for (let i = 0; i < byteLen; i++) memory.write8(addr + 4 + i, memory.read8(psz + i));
+            memory.write16(addr + 4 + byteLen, 0);
+            cpu.regs[REG.EAX] = addr + 4;
+        } else { cpu.regs[REG.EAX] = 0; }
+        cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(6, (cpu) => { cleanupStdcall(cpu, memory, 4); }); // SysFreeString
+    oleOrd(7, (cpu) => { // SysStringLen
+        const bstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = bstr ? memory.read32(bstr - 4) >>> 1 : 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(8, (cpu) => { // SysStringByteLen
+        const bstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = bstr ? memory.read32(bstr - 4) : 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(9, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 8); }); // SysAllocStringByteLen
+
+    // Variant
+    oleOrd(27, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 16); }); // VariantChangeType
+    oleOrd(28, (cpu) => { // VariantClear
+        const pv = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (pv) { memory.write16(pv, 0); memory.write16(pv + 2, 0); }
+        cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(29, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 8); }); // VariantCopy
+    oleOrd(30, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 8); }); // VariantCopyInd
+    oleOrd(31, (cpu) => { // VariantInit
+        const pv = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (pv) { memory.write16(pv, 0); memory.write16(pv + 2, 0); }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Type library functions (game may call but we don't support them)
+    oleOrd(150, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 12); }); // CreateTypeLib → E_NOTIMPL
+    oleOrd(151, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 20); }); // QueryPathOfRegTypeLib → E_NOTIMPL
+    oleOrd(152, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 20); }); // LoadRegTypeLib → E_NOTIMPL
+    oleOrd(153, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 8); });  // LoadTypeLib → E_NOTIMPL
+    oleOrd(154, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 12); }); // LoadTypeLibEx → E_NOTIMPL
+    oleOrd(155, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 12); }); // RegisterTypeLib → E_NOTIMPL
+
     // =============== OLE32: COM ===============
 
     stubs.registerStub("ole32.dll", "CoInitialize", (cpu) => {
@@ -2845,6 +3393,254 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         }
         cpu.regs[REG.EAX] = 1; // TRUE = success
         cleanupStdcall(cpu, memory, 8);
+    });
+
+    // ── wsock32.dll stubs (imported by ordinal) ───────────────────────────────
+    // The game imports wsock32.dll by ordinal number.  Ordinals are mapped to
+    // their canonical names below.  When any socket-creating function is called
+    // we print a one-time banner so the developer knows to implement real I/O.
+    // Pure math helpers (htons/ntohl/…) are implemented correctly because the
+    // game uses their return values for routing and packet construction.
+
+    let winsockFirstHit = false;
+    function winsockBanner(fn: string): void {
+        if (!winsockFirstHit) {
+            winsockFirstHit = true;
+            console.log("\n╔══════════════════════════════════════════════╗");
+            console.log("║  WINSOCK HIT — real network I/O needed here  ║");
+            console.log("╚══════════════════════════════════════════════╝");
+        }
+        console.log(`  [Winsock] ${fn}()`);
+    }
+
+    const INVALID_SOCKET = 0xFFFFFFFF; // (SOCKET)(~0)
+    const SOCKET_ERROR   = 0xFFFFFFFF; // -1 as unsigned
+
+    // Ordinal #116 — WSAStartup(WORD wVersionRequested, LPWSADATA lpWSAData) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #116", (cpu) => {
+        const lpWSAData = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        winsockBanner("WSAStartup");
+        // Fill WSADATA minimally: wVersion=0x0202, wHighVersion=0x0202, szDescription="WinSock 2.0"
+        if (lpWSAData) {
+            memory.write32(lpWSAData,      0x02020202); // wVersion + wHighVersion
+            // szDescription[257] and szSystemStatus[129] — leave as zeroes (already 0)
+            memory.write32(lpWSAData + 4,  0);
+            memory.write32(lpWSAData + 8,  0);
+        }
+        cpu.regs[REG.EAX] = 0; // 0 = success
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #111 — WSACleanup() -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #111", (cpu) => {
+        console.log("  [Winsock] WSACleanup()");
+        cpu.regs[REG.EAX] = 0; // 0 = success
+        cleanupStdcall(cpu, memory, 0);
+    });
+
+    // Ordinal #113 — WSAGetLastError() -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #113", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // WSAENONE
+        cleanupStdcall(cpu, memory, 0);
+    });
+
+    // Ordinal #115 — WSASetLastError(int iError) -> void
+    stubs.registerStub("wsock32.dll", "Ordinal #115", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #8 — htonl(u_long hostlong) -> u_long
+    stubs.registerStub("wsock32.dll", "Ordinal #8", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        // swap bytes: host→network (big-endian)
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 24) | (((v >> 8) & 0xFF) << 16) | (((v >> 16) & 0xFF) << 8) | ((v >> 24) & 0xFF)) >>> 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #14 — ntohl(u_long netlong) -> u_long  (same byte-swap)
+    stubs.registerStub("wsock32.dll", "Ordinal #14", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 24) | (((v >> 8) & 0xFF) << 16) | (((v >> 16) & 0xFF) << 8) | ((v >> 24) & 0xFF)) >>> 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #9 — htons(u_short hostshort) -> u_short
+    stubs.registerStub("wsock32.dll", "Ordinal #9", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0) & 0xFFFF;
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 8) | ((v >> 8) & 0xFF)) & 0xFFFF;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #15 — ntohs(u_short netshort) -> u_short  (same swap)
+    stubs.registerStub("wsock32.dll", "Ordinal #15", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0) & 0xFFFF;
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 8) | ((v >> 8) & 0xFF)) & 0xFFFF;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #10 — inet_addr(const char* cp) -> u_long  (returns network-byte-order IP)
+    stubs.registerStub("wsock32.dll", "Ordinal #10", (cpu) => {
+        const ptr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const s = readCString(ptr, 32);
+        const parts = s.split(".").map(Number);
+        if (parts.length === 4 && parts.every(p => p >= 0 && p <= 255)) {
+            const ip = ((parts[0] & 0xFF)) | ((parts[1] & 0xFF) << 8) | ((parts[2] & 0xFF) << 16) | ((parts[3] & 0xFF) << 24);
+            cpu.regs[REG.EAX] = ip >>> 0;
+        } else {
+            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INADDR_NONE
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #11 — inet_ntoa(struct in_addr in) -> char*  (returns static buffer pointer)
+    stubs.registerStub("wsock32.dll", "Ordinal #11", (cpu) => {
+        const ip = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const s = `${ip & 0xFF}.${(ip >> 8) & 0xFF}.${(ip >> 16) & 0xFF}.${(ip >> 24) & 0xFF}`;
+        // Write into a static area in stub data region
+        const buf = 0x00201500;
+        for (let i = 0; i < s.length; i++) memory.write8(buf + i, s.charCodeAt(i));
+        memory.write8(buf + s.length, 0);
+        cpu.regs[REG.EAX] = buf;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #23 — socket(int af, int type, int protocol) -> SOCKET
+    stubs.registerStub("wsock32.dll", "Ordinal #23", (cpu) => {
+        winsockBanner("socket");
+        cpu.regs[REG.EAX] = INVALID_SOCKET; // TODO: real socket creation
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #4 — connect(SOCKET s, const sockaddr* name, int namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #4", (cpu) => {
+        winsockBanner("connect");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #1 — accept(SOCKET s, sockaddr* addr, int* addrlen) -> SOCKET
+    stubs.registerStub("wsock32.dll", "Ordinal #1", (cpu) => {
+        winsockBanner("accept");
+        cpu.regs[REG.EAX] = INVALID_SOCKET;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #2 — bind(SOCKET s, const sockaddr* name, int namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #2", (cpu) => {
+        winsockBanner("bind");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #13 — listen(SOCKET s, int backlog) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #13", (cpu) => {
+        winsockBanner("listen");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #16 — recv(SOCKET s, char* buf, int len, int flags) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #16", (cpu) => {
+        winsockBanner("recv");
+        cpu.regs[REG.EAX] = SOCKET_ERROR; // TODO: real recv
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // Ordinal #17 — recvfrom(SOCKET, char*, int, int, sockaddr*, int*) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #17", (cpu) => {
+        winsockBanner("recvfrom");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // Ordinal #19 — send(SOCKET s, const char* buf, int len, int flags) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #19", (cpu) => {
+        winsockBanner("send");
+        cpu.regs[REG.EAX] = SOCKET_ERROR; // TODO: real send
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // Ordinal #20 — sendto(SOCKET, const char*, int, int, const sockaddr*, int) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #20", (cpu) => {
+        winsockBanner("sendto");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // Ordinal #3 — closesocket(SOCKET s) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #3", (cpu) => {
+        console.log("  [Winsock] closesocket()");
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #22 — shutdown(SOCKET s, int how) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #22", (cpu) => {
+        console.log("  [Winsock] shutdown()");
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #18 — select(int nfds, fd_set*, fd_set*, fd_set*, const timeval*) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #18", (cpu) => {
+        winsockBanner("select");
+        cpu.regs[REG.EAX] = 0; // 0 = timeout / nothing ready
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // Ordinal #12 — ioctlsocket(SOCKET s, long cmd, u_long* argp) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #12", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #6 — getsockname(SOCKET s, sockaddr* name, int* namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #6", (cpu) => {
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #7 — getsockopt(SOCKET, int level, int optname, char* optval, int* optlen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #7", (cpu) => {
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // Ordinal #21 — setsockopt(SOCKET, int, int, const char*, int) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #21", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // Ordinal #5 — getpeername(SOCKET s, sockaddr* name, int* namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #5", (cpu) => {
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #52 — gethostbyname(const char* name) -> struct hostent*
+    stubs.registerStub("wsock32.dll", "Ordinal #52", (cpu) => {
+        winsockBanner("gethostbyname");
+        cpu.regs[REG.EAX] = 0; // NULL = not found
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #57 — gethostname(char* name, int namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #57", (cpu) => {
+        const ptr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const len = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const hostname = "localhost\0";
+        for (let i = 0; i < Math.min(hostname.length, len); i++) memory.write8(ptr + i, hostname.charCodeAt(i));
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #101 — WSAAsyncGetHostByName(HWND, u_int, const char*, char*, int) -> HANDLE
+    stubs.registerStub("wsock32.dll", "Ordinal #101", (cpu) => {
+        winsockBanner("WSAAsyncGetHostByName");
+        cpu.regs[REG.EAX] = 0; // NULL = failure
+        cleanupStdcall(cpu, memory, 20);
     });
 
     console.log(`[Win32Stubs] Registered ${stubs.count} API stubs in memory at 0x${STUB_BASE.toString(16)}`);
