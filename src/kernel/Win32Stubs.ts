@@ -732,19 +732,54 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     });
 
     // LoadLibraryA(LPCSTR lpLibFileName) -> HMODULE
+    // For DLL names with a path component, checks the filesystem via translateWindowsPath
+    // and prompts if the file is missing (respects interactiveOnMissingFile).
     stubs.registerStub("kernel32.dll", "LoadLibraryA", (cpu) => {
         const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
-        let name = "";
-        for (let i = 0; i < 260; i++) {
-            const ch = memory.read8(namePtr + i);
-            if (ch === 0) break;
-            name += String.fromCharCode(ch);
+        let name = readCString(namePtr);
+
+        // Drive-relative paths (\foo\bar.dll) — treat as C:\foo\bar.dll
+        if ((name.startsWith("\\") || name.startsWith("/")) && !/^[a-zA-Z]:/.test(name)) {
+            name = "C:" + name;
         }
+
+        const hasSeparator = name.includes("\\") || name.includes("/");
+        if (hasSeparator) {
+            // Path given — check the filesystem, prompt if missing
+            let linuxPath = translateWindowsPath(name);
+            while (true) {
+                if (existsSync(linuxPath)) {
+                    console.log(`  [Win32] LoadLibraryA("${name}") -> found`);
+                    const hash = name.toLowerCase().split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0) >>> 0;
+                    cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000;
+                    cleanupStdcall(cpu, memory, 4);
+                    return;
+                }
+                if (!emulatorConfig.interactiveOnMissingFile) {
+                    console.log(`  [Win32] LoadLibraryA("${name}") -> NULL (not found: ${linuxPath})`);
+                    cpu.regs[REG.EAX] = 0; // NULL = failure
+                    cleanupStdcall(cpu, memory, 4);
+                    return;
+                }
+                process.stdout.write(`\n[LoadLibrary] DLL not found: ${linuxPath}\n`);
+                process.stdout.write(`  Add the file then press Enter to retry, or type 'c' to continue without it.\n`);
+                process.stdout.write(`  > `);
+                const answer = readLineTTY().toLowerCase();
+                if (answer !== "c") {
+                    linuxPath = translateWindowsPath(name);
+                    continue;
+                }
+                console.log(`  [Win32] LoadLibraryA("${name}") -> NULL (user skipped)`);
+                cpu.regs[REG.EAX] = 0;
+                cleanupStdcall(cpu, memory, 4);
+                return;
+            }
+        }
+
+        // Plain DLL name (no path) — return fake module handle for GetProcAddress lookups
         console.log(`  [Win32] LoadLibraryA("${name}")`);
-        // Return fake module handle based on DLL name hash (non-zero = success)
-        // The CRT uses LoadLibraryA to get handles for GetProcAddress calls
         const hash = name.toLowerCase().split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0) >>> 0;
-        cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000; // Ensure non-zero and in valid range
+        cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000;
         cleanupStdcall(cpu, memory, 4);
     });
 
@@ -993,6 +1028,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     let sleepCount = 0;
     let isRunningThread = false;  // true when we're executing a thread's code
     let currentThreadIdx = -1;    // index of currently running thread (-1 = main)
+    let lastScheduledIdx = -1;    // index of thread last given a time slice (round-robin)
     // Sentinel address for thread return detection
     const THREAD_SENTINEL = 0x001FE000;
     memory.write8(THREAD_SENTINEL, 0xCD);   // INT
@@ -1015,10 +1051,20 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     stubs.registerStub("kernel32.dll", "Sleep", (cpu) => {
         sleepCount++;
 
-        // Check for pending threads to run
-        const runnableThread = pendingThreads.find(t => !t.suspended && !t.completed);
-        if (runnableThread) {
-            const threadIdx = pendingThreads.indexOf(runnableThread);
+        // Check for pending threads to run (round-robin scheduler)
+        const numThreads = pendingThreads.length;
+        let runnableThread: PendingThread | undefined;
+        let threadIdx = -1;
+        for (let i = 1; i <= numThreads; i++) {
+            const idx = (lastScheduledIdx + i) % numThreads;
+            if (!pendingThreads[idx].suspended && !pendingThreads[idx].completed) {
+                runnableThread = pendingThreads[idx];
+                threadIdx = idx;
+                break;
+            }
+        }
+        if (runnableThread && threadIdx >= 0) {
+            lastScheduledIdx = threadIdx;
             console.log(`  [Scheduler] Main thread Sleep #${sleepCount} - switching to thread ${runnableThread.threadId} (startAddr=0x${runnableThread.startAddress.toString(16)})`);
 
             // Save main thread state
@@ -1108,7 +1154,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
                     // Check for thread runaway: EIP outside valid code regions
                     const eip = cpu.eip >>> 0;
-                    const inStubs = eip >= 0x00200000 && eip < 0x00202000;
+                    const inStubs = eip >= 0x00200000 && eip < 0x00220000;
                     const inExe = eip >= 0x00400000 && eip < 0x02000000;
                     const inDlls = eip >= 0x10000000 && eip < 0x40000000;
                     const inThreadSentinel = eip >= 0x001FE000 && eip < 0x001FE004;

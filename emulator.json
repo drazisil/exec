@@ -3,7 +3,7 @@
 
     "pathMappings": {
         "_comment": "Map Windows drive/path prefixes to Linux paths. Keys are Windows prefixes (backslash or forward slash, case-insensitive). Values are the corresponding Linux directory (must end with /).",
-        "C:\\": "/home/drazisil/mco-source/"
+        "C:\\": "/home/drazisil/.emu32/"
     },
 
     "interactiveOnMissingFile": true,
