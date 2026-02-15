@@ -35,18 +35,18 @@ export class ImportResolver {
         for (const descriptor of importTable.descriptors) {
             const dllName = descriptor.dllName.toLowerCase();
 
-            // Try to load the real DLL
+            // Try to load the real DLL (optional — stubs work without it)
             const loadedDll = this._dllLoader.loadDLL(descriptor.dllName, this._memory);
 
             for (const entry of descriptor.entries) {
                 let realAddr: number | null = null;
 
                 if (loadedDll) {
-                    // Try to find the exported function in the loaded DLL
                     realAddr = loadedDll.exports.get(entry.name) || null;
                 }
 
-                // Map the IAT RVA to the real address (or null if not found)
+                // Always record the entry so writeIATStubs can install auto-stubs
+                // for functions that have no real DLL address and no hand-written stub.
                 this._iatMap.set(entry.iatRva, {
                     dllName,
                     functionName: entry.name,
@@ -54,14 +54,9 @@ export class ImportResolver {
                 });
 
                 if (realAddr) {
-                    console.log(
-                        `[ImportResolver] ${dllName}!${entry.name} => 0x${realAddr.toString(16)}`
-                    );
-                } else {
-                    console.log(
-                        `[ImportResolver] ${dllName}!${entry.name} => NOT FOUND`
-                    );
+                    console.log(`[ImportResolver] ${dllName}!${entry.name} => 0x${realAddr.toString(16)}`);
                 }
+                // (suppress "NOT FOUND" spam — auto-stubs will cover these silently)
             }
         }
 
@@ -78,7 +73,7 @@ export class ImportResolver {
 
         let stubCount = 0;
         let realCount = 0;
-        let unresolvedCount = 0;
+        let autoStubCount = 0;
 
         for (const descriptor of importTable.descriptors) {
             for (const entry of descriptor.entries) {
@@ -98,13 +93,28 @@ export class ImportResolver {
                 } else if (mapEntry.realAddr) {
                     memory.write32(iatAddr, mapEntry.realAddr);
                     realCount++;
-                } else {
-                    unresolvedCount++;
+                } else if (win32Stubs) {
+                    // No stub and no real DLL — auto-register a "not implemented" stub so
+                    // the IAT entry is never a null/garbage pointer.  The real DLL files
+                    // are therefore optional; we only need them when we deliberately want
+                    // to fall through to real code (which we currently never do).
+                    const dllName = mapEntry.dllName;
+                    const funcName = mapEntry.functionName;
+                    win32Stubs.registerStub(dllName, funcName, (cpu) => {
+                        console.log(`  [UNIMPLEMENTED] ${dllName}!${funcName} — halting`);
+                        cpu.halted = true;
+                    });
+                    const autoAddr = win32Stubs.getStubAddress(dllName, funcName)
+                        ?? win32Stubs.getStubAddress(dllName + ".dll", funcName);
+                    if (autoAddr !== null) {
+                        memory.write32(iatAddr, autoAddr);
+                        autoStubCount++;
+                    }
                 }
             }
         }
 
-        console.log(`[ImportResolver] IAT written: ${stubCount} stubs, ${realCount} real DLL, ${unresolvedCount} unresolved`);
+        console.log(`[ImportResolver] IAT written: ${stubCount} stubs, ${realCount} real DLL, ${autoStubCount} auto-stubs (unimplemented)`);
 
         // Also patch all loaded DLLs' IAT entries to use stubs where available
         // This prevents DLL→DLL calls from entering real DLL code
