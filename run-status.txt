@@ -1,0 +1,191 @@
+=== Loading PE File ===
+
+Entry point RVA: 0x5fc980
+Image base: 0x400000
+Sections: 7
+Entry point in section: .text
+[Win32Stubs] Registered 274 API stubs in memory at 0x200000
+
+=== Loading Sections ===
+  .text    @ 0x00401000 (14180352 bytes, virtual size: 14177280 bytes)
+  PACODE   @ 0x01187000 (8192 bytes, virtual size: 8111 bytes)
+  .rdata   @ 0x01189000 (868352 bytes, virtual size: 868303 bytes)
+  .data    @ 0x0125d000 (274432 bytes, virtual size: 15295460 bytes)
+    Note: Section has 15021028 bytes of uninitialized data (auto-zeroed)
+  .idata   @ 0x020f4000 (12288 bytes, virtual size: 12197 bytes)
+  .rsrc    @ 0x020f7000 (249856 bytes, virtual size: 247280 bytes)
+  .reloc   @ 0x02134000 (552960 bytes, virtual size: 549004 bytes)
+Total loaded: 16146432 bytes
+DEBUG: Setting EIP = imageBase(4194304) + entryRVA(6277504) = 10471808 (0x9fc980)
+
+=== Starting Emulation ===
+
+Initial state: EIP=009fc980  EAX=00000000  ECX=00000000  EDX=00000000  EBX=00000000  ESP=7fffffec  EBP=7ffffff0  ESI=00000000  EDI=00000000  [cf zf sf of]
+
+
+=== DLL Address Mappings ===
+  0x10000000-0x10ffffff d3d8.dll
+  0x11000000-0x11ffffff msvcrt.dll
+  0x12000000-0x12ffffff ntdll.dll
+  0x13000000-0x13ffffff api-ms-win-core-console-l1-1-0.dll
+  0x14000000-0x14ffffff api-ms-win-core-datetime-l1-1-0.dll
+  0x15000000-0x15ffffff api-ms-win-core-namedpipe-l1-1-0.dll
+  0x16000000-0x16ffffff api-ms-win-core-processthreads-l1-1-0.dll
+  0x17000000-0x17ffffff api-ms-win-core-profile-l1-1-0.dll
+  0x18000000-0x18ffffff api-ms-win-core-synch-l1-1-0.dll
+  0x19000000-0x19ffffff api-ms-win-core-synch-l1-2-0.dll
+  0x1a000000-0x1affffff api-ms-win-core-sysinfo-l1-1-0.dll
+  0x1b000000-0x1bffffff api-ms-win-core-util-l1-1-0.dll
+  0x1c000000-0x1cffffff KERNELBASE.dll
+  0x1d000000-0x1dffffff USER32.dll
+  0x1e000000-0x1effffff win32u.dll
+  0x1f000000-0x1fffffff GDI32.dll
+  0x20000000-0x20ffffff api-ms-win-core-apiquery-l1-1-0.dll
+  0x21000000-0x21ffffff ADVAPI32.dll
+  0x22000000-0x22ffffff KERNEL32.dll
+  0x23000000-0x23ffffff api-ms-win-core-rtlsupport-l1-1-0.dll
+  0x24000000-0x24ffffff api-ms-win-core-processthreads-l1-1-2.dll
+  0x25000000-0x25ffffff api-ms-win-core-sysinfo-l1-2-1.dll
+  0x26000000-0x26ffffff RPCRT4.dll
+  0x27000000-0x27ffffff COMCTL32.dll
+  0x28000000-0x28ffffff comdlg32.dll
+  0x29000000-0x29ffffff api-ms-win-core-errorhandling-l1-1-1.dll
+  0x2a000000-0x2affffff SHELL32.dll
+  0x2b000000-0x2bffffff ole32.dll
+  0x2c000000-0x2cffffff OLEAUT32.dll
+  0x2d000000-0x2dffffff WINMM.dll
+  0x2e000000-0x2effffff DINPUT.dll
+  0x2f000000-0x2fffffff DINPUT8.dll
+  0x30000000-0x30ffffff DSOUND.dll
+  0x31000000-0x31ffffff WSOCK32.dll
+  0x32000000-0x32ffffff VERSION.dll
+  0x33000000-0x33ffffff WININET.dll
+  0x34000000-0x34ffffff IFC22.dll
+  0x35000000-0x35ffffff IMPLODE.DLL
+  [Win32] GetProcAddress(0x400000, "IsProcessorFeaturePresent") -> 0x200520
+  [Win32] CreateThread(startAddr=0x9f58f0, param=0x4002b50, flags=0x4) -> handle=0xbeef, tid=1001
+  [Win32] ResumeThread(0xbeef) - unsuspending thread 1001
+[OutputDebugString] Created Chat Filter thread, Handle = 0xBEEF
+
+  [Scheduler] Main thread Sleep #1 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Thread] Starting thread at EIP=0x9f58f0, ESP=0x503ffe8
+  [Thread] Parameter object at 0x4002b50:
+    [+0x0] = 0x3e9
+    [+0x4] = 0xbeef
+    [+0x14] = 0x1
+    [+0x48] = 0x4013bb
+    [+0x4c] = 0x13e0780
+    [+0x50] = 0x1281330
+[OutputDebugString] Filter thread started, Handle = 0xBEEF : ID = 0x162E
+
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x503ef9)
+  [Win32] RegOpenKeyExA(parent=0x80000002, "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\mcity.exe") phkResult@0x7ffff928
+  [Win32] GetPrivateProfileStringA("[]", "Path", default="", file="")
+  [Win32] RegQueryValueExA(key=0x0, "Path") -> NOT FOUND
+  [Win32] RegOpenKeyExA(parent=0x80000002, "SOFTWARE\Electronic Arts\Motor City\1.0") phkResult@0x7ffff928
+  [Win32] RegQueryValueExA(key=0xbeef0201, "instLev") -> 2
+  [Win32] RegQueryValueExA(key=0xbeef0201, "SrcDrive") -> "C:"
+  [Win32] RegOpenKeyExA(parent=0x80000002, "SOFTWARE\Electronic Arts\Motor City\1.0") phkResult@0x7ffffd44
+  [Win32] RegQueryValueExA(key=0xbeef0202, "Language") -> NOT FOUND
+  [FileIO] CreateFile("MCity_Log.txt") -> 0x5000 [write]
+  [Win32] RegOpenKeyExA(parent=0x80000002, "SOFTWARE\Electronic Arts\Network Play System") phkResult@0x7ffffd30
+  [Win32] RegQueryValueExA(key=0xbeef0203, "Log") -> NOT FOUND
+  [Win32] DialogBoxParamA("#114") -> IDOK
+  [Win32] CreateDialogParamA() -> 0xABCE
+  [Win32] CreateThread(startAddr=0x9f58f0, param=0x40555a0, flags=0x4) -> handle=0xbef0, tid=1002
+  [Win32] ResumeThread(0xbef0) - unsuspending thread 1002
+[OutputDebugString] Created an INet thread, Handle = 0xBEF0
+
+  [Scheduler] Main thread Sleep #2 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x9f1bc2)
+  [Scheduler] Main thread Sleep #3 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x503f15)
+  [Scheduler] Main thread Sleep #4 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x503f0d)
+  [Scheduler] Main thread Sleep #5 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x502c5e)
+  [Scheduler] Main thread Sleep #6 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x50409e)
+  [Scheduler] Main thread Sleep #7 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x502c37)
+  [Scheduler] Main thread Sleep #8 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b07)
+  [Scheduler] Main thread Sleep #9 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x5040ab)
+  [Scheduler] Main thread Sleep #10 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x502c49)
+  [Scheduler] Main thread Sleep #11 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b19)
+  [Scheduler] Main thread Sleep #12 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0d94)
+  [Scheduler] Main thread Sleep #13 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504aa3)
+  [Scheduler] Main thread Sleep #14 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b2c)
+  [Scheduler] Main thread Sleep #15 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0c8f)
+  [Scheduler] Main thread Sleep #16 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504ab2)
+  [Scheduler] Main thread Sleep #17 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x9f1bc0)
+  [Scheduler] Main thread Sleep #18 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0c9c)
+  [Scheduler] Main thread Sleep #19 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504ac6)
+  [Scheduler] Main thread Sleep #20 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b44)
+  [Scheduler] Main thread Sleep #21 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0cbb)
+  [Scheduler] Main thread Sleep #22 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504ad5)
+  [Scheduler] Main thread Sleep #23 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x502c69)
+  [Scheduler] Main thread Sleep #24 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x503ef3)
+  [Scheduler] Main thread Sleep #25 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504adf)
+  [Scheduler] Main thread Sleep #26 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x9f1bc2)
+  [Scheduler] Main thread Sleep #27 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x503f02)
+  [Scheduler] Main thread Sleep #28 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504aec)
+  [Scheduler] Main thread Sleep #29 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x503f1b)
+  [Scheduler] Main thread Sleep #30 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x502c30)
+  [Scheduler] Main thread Sleep #31 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b00)
+  [Scheduler] Main thread Sleep #32 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x9f1bc0)
+  [Scheduler] Main thread Sleep #33 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x502c3a)
+  [Scheduler] Main thread Sleep #34 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b0a)
+  [Scheduler] Main thread Sleep #35 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0d83)
+  [Scheduler] Main thread Sleep #36 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x502c50)
+  [Scheduler] Main thread Sleep #37 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b20)
+  [Scheduler] Main thread Sleep #38 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0c86)
+  [Scheduler] Main thread Sleep #39 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504aa8)
+  [Scheduler] Main thread Sleep #40 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x2003c0)
+  [Scheduler] Main thread Sleep #41 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0c95)
+  [Scheduler] Main thread Sleep #42 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504aba)
+  [Scheduler] Main thread Sleep #43 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b3d)
+  [Scheduler] Main thread Sleep #44 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0caa)
+  [Scheduler] Main thread Sleep #45 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504ace)
+  [Scheduler] Main thread Sleep #46 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x504b49)
+  [Scheduler] Main thread Sleep #47 - switching to thread 1001 (startAddr=0x9f58f0)
+  [Scheduler] Thread 1001 yielded after 1000000 steps (EIP=0x4d0cc3)
+  [Scheduler] Main thread Sleep #48 - switching to thread 1001 (startAddr=0x9f58f0)
