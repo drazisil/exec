@@ -25,6 +25,7 @@ export class CPU {
     memory: Memory;
     halted: boolean;
     kernelStructures: KernelStructures | null;
+    segments: { ES: number; DS: number; CS: number; SS: number; FS: number; GS: number };
     private _opcodeTable: Map<number, OpcodeHandler>;
     private _intHandler: ((intNum: number, cpu: CPU) => void) | null;
     private _exceptionHandler: ((error: Error, cpu: CPU) => void) | null;
@@ -47,6 +48,7 @@ export class CPU {
         this.memory = memory;
         this.halted = false;
         this.kernelStructures = null;
+        this.segments = { ES: 0, DS: 0, CS: 0, SS: 0, FS: 0, GS: 0 };
         this._opcodeTable = new Map();
         this._intHandler = null;
         this._exceptionHandler = null;

@@ -156,14 +156,20 @@ for (const section of exe.sectionHeaders) {
 }
 
 // DLL ranges
+console.log("\n=== DLL Address Mappings ===");
 for (const mapping of exe.importResolver.getAddressMappings()) {
     validRanges.push([mapping.baseAddress, mapping.endAddress, `dll:${mapping.dllName}`]);
+    console.log(`  0x${mapping.baseAddress.toString(16).padStart(8,'0')}-0x${mapping.endAddress.toString(16).padStart(8,'0')} ${mapping.dllName}`);
 }
 
 // Stub region
 validRanges.push([0x00200000, 0x00202000, "stubs"]);
 // Sentinel HLT address
 validRanges.push([SENTINEL_ADDR, SENTINEL_ADDR + 1, "sentinel-hlt"]);
+// Thread sentinel address
+validRanges.push([0x001FE000, 0x001FE004, "thread-sentinel"]);
+// Thread stack region
+validRanges.push([0x05000000, 0x05100000, "thread-stacks"]);
 
 function isValidEIP(eip: number): string | null {
     for (const [start, end, name] of validRanges) {
@@ -172,7 +178,7 @@ function isValidEIP(eip: number): string | null {
     return null;
 }
 
-cpu.enableTrace(200);
+cpu.enableTrace(5000);
 
 let lastValidStep = 0;
 let lastValidEIP = 0;
@@ -181,7 +187,7 @@ let detectedRunaway = false;
 
 try {
     // Custom run loop with EIP validity checking
-    const maxSteps = 10_000_000;
+    const maxSteps = 500_000_000;
     let stepCount = 0;
     while (!cpu.halted && stepCount < maxSteps) {
         const eipBefore = cpu.eip;

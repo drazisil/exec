@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { Memory } from '#hardware/Memory.ts';
+import { Memory } from '#hardware/Memory';
 
 describe('Memory', () => {
   let mem: Memory;

@@ -110,6 +110,9 @@ export class ImportResolver {
         // This prevents DLL→DLL calls from entering real DLL code
         if (win32Stubs) {
             this._dllLoader.patchDLLIATs(memory, win32Stubs);
+            // Also patch DLL export addresses directly with trampolines.
+            // This catches calls through export forwarding chains that bypass IAT.
+            this._dllLoader.patchDLLExports(memory, win32Stubs);
         }
     }
 
