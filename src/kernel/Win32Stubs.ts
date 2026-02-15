@@ -3321,6 +3321,254 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 8);
     });
 
+    // ── wsock32.dll stubs (imported by ordinal) ───────────────────────────────
+    // The game imports wsock32.dll by ordinal number.  Ordinals are mapped to
+    // their canonical names below.  When any socket-creating function is called
+    // we print a one-time banner so the developer knows to implement real I/O.
+    // Pure math helpers (htons/ntohl/…) are implemented correctly because the
+    // game uses their return values for routing and packet construction.
+
+    let winsockFirstHit = false;
+    function winsockBanner(fn: string): void {
+        if (!winsockFirstHit) {
+            winsockFirstHit = true;
+            console.log("\n╔══════════════════════════════════════════════╗");
+            console.log("║  WINSOCK HIT — real network I/O needed here  ║");
+            console.log("╚══════════════════════════════════════════════╝");
+        }
+        console.log(`  [Winsock] ${fn}()`);
+    }
+
+    const INVALID_SOCKET = 0xFFFFFFFF; // (SOCKET)(~0)
+    const SOCKET_ERROR   = 0xFFFFFFFF; // -1 as unsigned
+
+    // Ordinal #116 — WSAStartup(WORD wVersionRequested, LPWSADATA lpWSAData) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #116", (cpu) => {
+        const lpWSAData = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        winsockBanner("WSAStartup");
+        // Fill WSADATA minimally: wVersion=0x0202, wHighVersion=0x0202, szDescription="WinSock 2.0"
+        if (lpWSAData) {
+            memory.write32(lpWSAData,      0x02020202); // wVersion + wHighVersion
+            // szDescription[257] and szSystemStatus[129] — leave as zeroes (already 0)
+            memory.write32(lpWSAData + 4,  0);
+            memory.write32(lpWSAData + 8,  0);
+        }
+        cpu.regs[REG.EAX] = 0; // 0 = success
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #111 — WSACleanup() -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #111", (cpu) => {
+        console.log("  [Winsock] WSACleanup()");
+        cpu.regs[REG.EAX] = 0; // 0 = success
+        cleanupStdcall(cpu, memory, 0);
+    });
+
+    // Ordinal #113 — WSAGetLastError() -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #113", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // WSAENONE
+        cleanupStdcall(cpu, memory, 0);
+    });
+
+    // Ordinal #115 — WSASetLastError(int iError) -> void
+    stubs.registerStub("wsock32.dll", "Ordinal #115", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #8 — htonl(u_long hostlong) -> u_long
+    stubs.registerStub("wsock32.dll", "Ordinal #8", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        // swap bytes: host→network (big-endian)
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 24) | (((v >> 8) & 0xFF) << 16) | (((v >> 16) & 0xFF) << 8) | ((v >> 24) & 0xFF)) >>> 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #14 — ntohl(u_long netlong) -> u_long  (same byte-swap)
+    stubs.registerStub("wsock32.dll", "Ordinal #14", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 24) | (((v >> 8) & 0xFF) << 16) | (((v >> 16) & 0xFF) << 8) | ((v >> 24) & 0xFF)) >>> 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #9 — htons(u_short hostshort) -> u_short
+    stubs.registerStub("wsock32.dll", "Ordinal #9", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0) & 0xFFFF;
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 8) | ((v >> 8) & 0xFF)) & 0xFFFF;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #15 — ntohs(u_short netshort) -> u_short  (same swap)
+    stubs.registerStub("wsock32.dll", "Ordinal #15", (cpu) => {
+        const v = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0) & 0xFFFF;
+        cpu.regs[REG.EAX] = (((v & 0xFF) << 8) | ((v >> 8) & 0xFF)) & 0xFFFF;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #10 — inet_addr(const char* cp) -> u_long  (returns network-byte-order IP)
+    stubs.registerStub("wsock32.dll", "Ordinal #10", (cpu) => {
+        const ptr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const s = readCString(ptr, 32);
+        const parts = s.split(".").map(Number);
+        if (parts.length === 4 && parts.every(p => p >= 0 && p <= 255)) {
+            const ip = ((parts[0] & 0xFF)) | ((parts[1] & 0xFF) << 8) | ((parts[2] & 0xFF) << 16) | ((parts[3] & 0xFF) << 24);
+            cpu.regs[REG.EAX] = ip >>> 0;
+        } else {
+            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INADDR_NONE
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #11 — inet_ntoa(struct in_addr in) -> char*  (returns static buffer pointer)
+    stubs.registerStub("wsock32.dll", "Ordinal #11", (cpu) => {
+        const ip = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const s = `${ip & 0xFF}.${(ip >> 8) & 0xFF}.${(ip >> 16) & 0xFF}.${(ip >> 24) & 0xFF}`;
+        // Write into a static area in stub data region
+        const buf = 0x00201500;
+        for (let i = 0; i < s.length; i++) memory.write8(buf + i, s.charCodeAt(i));
+        memory.write8(buf + s.length, 0);
+        cpu.regs[REG.EAX] = buf;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #23 — socket(int af, int type, int protocol) -> SOCKET
+    stubs.registerStub("wsock32.dll", "Ordinal #23", (cpu) => {
+        winsockBanner("socket");
+        cpu.regs[REG.EAX] = INVALID_SOCKET; // TODO: real socket creation
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #4 — connect(SOCKET s, const sockaddr* name, int namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #4", (cpu) => {
+        winsockBanner("connect");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #1 — accept(SOCKET s, sockaddr* addr, int* addrlen) -> SOCKET
+    stubs.registerStub("wsock32.dll", "Ordinal #1", (cpu) => {
+        winsockBanner("accept");
+        cpu.regs[REG.EAX] = INVALID_SOCKET;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #2 — bind(SOCKET s, const sockaddr* name, int namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #2", (cpu) => {
+        winsockBanner("bind");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #13 — listen(SOCKET s, int backlog) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #13", (cpu) => {
+        winsockBanner("listen");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #16 — recv(SOCKET s, char* buf, int len, int flags) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #16", (cpu) => {
+        winsockBanner("recv");
+        cpu.regs[REG.EAX] = SOCKET_ERROR; // TODO: real recv
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // Ordinal #17 — recvfrom(SOCKET, char*, int, int, sockaddr*, int*) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #17", (cpu) => {
+        winsockBanner("recvfrom");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // Ordinal #19 — send(SOCKET s, const char* buf, int len, int flags) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #19", (cpu) => {
+        winsockBanner("send");
+        cpu.regs[REG.EAX] = SOCKET_ERROR; // TODO: real send
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // Ordinal #20 — sendto(SOCKET, const char*, int, int, const sockaddr*, int) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #20", (cpu) => {
+        winsockBanner("sendto");
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // Ordinal #3 — closesocket(SOCKET s) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #3", (cpu) => {
+        console.log("  [Winsock] closesocket()");
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #22 — shutdown(SOCKET s, int how) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #22", (cpu) => {
+        console.log("  [Winsock] shutdown()");
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #18 — select(int nfds, fd_set*, fd_set*, fd_set*, const timeval*) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #18", (cpu) => {
+        winsockBanner("select");
+        cpu.regs[REG.EAX] = 0; // 0 = timeout / nothing ready
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // Ordinal #12 — ioctlsocket(SOCKET s, long cmd, u_long* argp) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #12", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #6 — getsockname(SOCKET s, sockaddr* name, int* namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #6", (cpu) => {
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #7 — getsockopt(SOCKET, int level, int optname, char* optval, int* optlen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #7", (cpu) => {
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // Ordinal #21 — setsockopt(SOCKET, int, int, const char*, int) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #21", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // Ordinal #5 — getpeername(SOCKET s, sockaddr* name, int* namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #5", (cpu) => {
+        cpu.regs[REG.EAX] = SOCKET_ERROR;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // Ordinal #52 — gethostbyname(const char* name) -> struct hostent*
+    stubs.registerStub("wsock32.dll", "Ordinal #52", (cpu) => {
+        winsockBanner("gethostbyname");
+        cpu.regs[REG.EAX] = 0; // NULL = not found
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Ordinal #57 — gethostname(char* name, int namelen) -> int
+    stubs.registerStub("wsock32.dll", "Ordinal #57", (cpu) => {
+        const ptr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const len = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const hostname = "localhost\0";
+        for (let i = 0; i < Math.min(hostname.length, len); i++) memory.write8(ptr + i, hostname.charCodeAt(i));
+        cpu.regs[REG.EAX] = 0; // success
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // Ordinal #101 — WSAAsyncGetHostByName(HWND, u_int, const char*, char*, int) -> HANDLE
+    stubs.registerStub("wsock32.dll", "Ordinal #101", (cpu) => {
+        winsockBanner("WSAAsyncGetHostByName");
+        cpu.regs[REG.EAX] = 0; // NULL = failure
+        cleanupStdcall(cpu, memory, 20);
+    });
+
     console.log(`[Win32Stubs] Registered ${stubs.count} API stubs in memory at 0x${STUB_BASE.toString(16)}`);
 }
 
