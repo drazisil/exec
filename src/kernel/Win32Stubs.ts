@@ -1445,6 +1445,18 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cleanupStdcall(cpu, memory, 4);
     });
 
+    // SetThreadPriority(HANDLE hThread, int nPriority) -> BOOL
+    stubs.registerStub("kernel32.dll", "SetThreadPriority", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE (success)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetThreadPriority(HANDLE hThread) -> int
+    stubs.registerStub("kernel32.dll", "GetThreadPriority", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // THREAD_PRIORITY_NORMAL
+        cleanupStdcall(cpu, memory, 4);
+    });
+
     // WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds) -> DWORD
     stubs.registerStub("kernel32.dll", "WaitForSingleObject", (cpu) => {
         cpu.regs[REG.EAX] = 0; // WAIT_OBJECT_0 (signaled immediately)
@@ -1527,8 +1539,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     const fileHandleMap = new Map<number, FileHandleEntry>();
     let nextFileHandle = 0x5000;
 
-    // Translate a Windows path to a Linux path.
-    // The game is installed at C:\MCity\ which maps to /home/drazisil/mco-source/MCity/
+    // Translate a Windows path to a Linux path using emulator.json pathMappings.
     function translateWindowsPath(winPath: string): string {
         let p = winPath.replace(/\\/g, "/");
         // Sort longest-first so more-specific prefixes match before shorter ones
@@ -3082,6 +3093,69 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         cpu.regs[REG.EAX] = 0;
         cleanupStdcall(cpu, memory, 4);
     });
+
+    // ── oleaut32.dll ordinal aliases ─────────────────────────────────────────
+    // MCO imports oleaut32 by ordinal.  Map standard XP-era ordinals (from
+    // Wine oleaut32.spec, which matches the real XP DLL) to existing stubs.
+    // Ordinal #2..#9  = Sys* BSTR functions
+    // Ordinal #27..#31 = Variant* functions
+    // Ordinal #150    = CreateTypeLib (3 args) → return E_NOTIMPL
+
+    function oleOrd(n: number, fn: (cpu: any) => void) {
+        stubs.registerStub("oleaut32.dll", `Ordinal #${n}`, fn);
+    }
+
+    // BSTR
+    oleOrd(2, (cpu) => { // SysAllocString(psz) -> BSTR
+        const psz = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (psz === 0) { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 4); return; }
+        let len = 0;
+        while (memory.read16(psz + len * 2)) len++;
+        const byteLen = len * 2;
+        const addr = (cpu as any).heapAlloc ? (cpu as any).heapAlloc(byteLen + 6) : 0x04800000;
+        if (addr) {
+            memory.write32(addr, byteLen);
+            for (let i = 0; i < byteLen; i++) memory.write8(addr + 4 + i, memory.read8(psz + i));
+            memory.write16(addr + 4 + byteLen, 0);
+            cpu.regs[REG.EAX] = addr + 4;
+        } else { cpu.regs[REG.EAX] = 0; }
+        cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(6, (cpu) => { cleanupStdcall(cpu, memory, 4); }); // SysFreeString
+    oleOrd(7, (cpu) => { // SysStringLen
+        const bstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = bstr ? memory.read32(bstr - 4) >>> 1 : 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(8, (cpu) => { // SysStringByteLen
+        const bstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = bstr ? memory.read32(bstr - 4) : 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(9, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 8); }); // SysAllocStringByteLen
+
+    // Variant
+    oleOrd(27, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 16); }); // VariantChangeType
+    oleOrd(28, (cpu) => { // VariantClear
+        const pv = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (pv) { memory.write16(pv, 0); memory.write16(pv + 2, 0); }
+        cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 4);
+    });
+    oleOrd(29, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 8); }); // VariantCopy
+    oleOrd(30, (cpu) => { cpu.regs[REG.EAX] = 0; cleanupStdcall(cpu, memory, 8); }); // VariantCopyInd
+    oleOrd(31, (cpu) => { // VariantInit
+        const pv = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (pv) { memory.write16(pv, 0); memory.write16(pv + 2, 0); }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // Type library functions (game may call but we don't support them)
+    oleOrd(150, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 12); }); // CreateTypeLib → E_NOTIMPL
+    oleOrd(151, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 20); }); // QueryPathOfRegTypeLib → E_NOTIMPL
+    oleOrd(152, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 20); }); // LoadRegTypeLib → E_NOTIMPL
+    oleOrd(153, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 8); });  // LoadTypeLib → E_NOTIMPL
+    oleOrd(154, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 12); }); // LoadTypeLibEx → E_NOTIMPL
+    oleOrd(155, (cpu) => { cpu.regs[REG.EAX] = 0x80004001; cleanupStdcall(cpu, memory, 12); }); // RegisterTypeLib → E_NOTIMPL
 
     // =============== OLE32: COM ===============
 

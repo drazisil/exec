@@ -9,6 +9,8 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { EXEFile } from './index.ts';
 import { CPU, Memory, REG, registerAllOpcodes, setupExceptionDiagnostics, KernelStructures, VRAMVisualizer } from './src/emulator/index.ts';
 
@@ -88,51 +90,18 @@ function initializeEmulator() {
     try {
         console.log('[Emulator] Initializing...');
 
-        const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
-        const searchPaths = [
-            "/home/drazisil/mco-source/MCity",
-            "/data/Downloads/Motor City Online",
-            "/data/Downloads",
-            "/data/Downloads/msvcrt",
-            "/data/Downloads/kernel32",
-            "/data/Downloads/ntdll",
-            "/data/Downloads/user32",
-            "/data/Downloads/shell32",
-            "/data/Downloads/gdi32",
-            "/data/Downloads/comctl32",
-            "/data/Downloads/comdlg32",
-            "/data/Downloads/advapi32",
-            "/data/Downloads/ole32",
-            "/data/Downloads/oleaut32",
-            "/data/Downloads/rpcrt4",
-            "/data/Downloads/dsound",
-            "/data/Downloads/dinput",
-            "/data/Downloads/dinput8",
-            "/data/Downloads/winmm",
-            "/data/Downloads/wininet",
-            "/data/Downloads/wsock32",
-            "/data/Downloads/version",
-            "/data/Downloads/ifc22",
-            "/data/Downloads/d3d8",
-            "/data/Downloads/kernelbase(1)",
-            "/data/Downloads/api-ms-win-core-apiquery-l1-1-0",
-            "/data/Downloads/api-ms-win-core-console-l1-1-0",
-            "/data/Downloads/api-ms-win-core-datetime-l1-1-0",
-            "/data/Downloads/api-ms-win-core-errorhandling-l1-1-1",
-            "/data/Downloads/api-ms-win-core-namedpipe-l1-1-0",
-            "/data/Downloads/api-ms-win-core-processthreads-l1-1-0",
-            "/data/Downloads/api-ms-win-core-processthreads-l1-1-2",
-            "/data/Downloads/api-ms-win-core-profile-l1-1-0",
-            "/data/Downloads/api-ms-win-core-rtlsupport-l1-1-0",
-            "/data/Downloads/api-ms-win-core-synch-ansi-l1-1-0",
-            "/data/Downloads/api-ms-win-core-synch-l1-1-0",
-            "/data/Downloads/api-ms-win-core-synch-l1-2-0",
-            "/data/Downloads/api-ms-win-core-sysinfo-l1-2-1",
-            "/data/Downloads/api-ms-win-core-util-l1-1-0",
-        ];
+        // Load exe path from emulator.json (no machine-specific paths in source)
+        let exePath = "";
+        try {
+            const cfg = JSON.parse(readFileSync(join(process.cwd(), "emulator.json"), "utf8"));
+            exePath = (cfg.exePath as string) ?? "";
+        } catch { /* emulator.json optional */ }
+        if (!exePath) {
+            throw new Error("No exe path configured. Set 'exePath' in emulator.json");
+        }
 
         // Load PE file
-        const exe = new EXEFile(exePath, searchPaths);
+        const exe = new EXEFile(exePath, []);
         console.log('[Emulator] PE file loaded');
 
         // Create memory and CPU with fallback allocation sizes

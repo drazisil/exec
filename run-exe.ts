@@ -1,52 +1,22 @@
 import { EXEFile } from "./index.ts";
 import { CPU, Memory, REG, registerAllOpcodes, setupExceptionDiagnostics, KernelStructures, Win32Stubs, registerCRTStartupStubs, patchCRTInternals } from "./src/emulator/index.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
-const exePath = "/home/drazisil/mco-source/MCity/MCity_d.exe";
+// Resolve exe path: CLI arg takes priority, then emulator.json, then error
+let exePath: string = process.argv[2] ?? "";
+if (!exePath) {
+    try {
+        const cfg = JSON.parse(readFileSync(join(process.cwd(), "emulator.json"), "utf8"));
+        exePath = (cfg.exePath as string) ?? "";
+    } catch { /* emulator.json optional */ }
+}
+if (!exePath) {
+    throw new Error("No exe path specified. Pass as CLI argument or set 'exePath' in emulator.json");
+}
 
 console.log("=== Loading PE File ===\n");
-const exe = new EXEFile(exePath, [
-    "/home/drazisil/mco-source/MCity",
-    "/data/Downloads/Motor City Online",
-    "/data/Downloads",
-    "/data/Downloads/msvcrt",
-    "/data/Downloads/kernel32",
-    "/data/Downloads/ntdll",
-    "/data/Downloads/user32",
-    "/data/Downloads/shell32",
-    "/data/Downloads/gdi32",
-    "/data/Downloads/comctl32",
-    "/data/Downloads/comdlg32",
-    "/data/Downloads/advapi32",
-    "/data/Downloads/ole32",
-    "/data/Downloads/oleaut32",
-    "/data/Downloads/rpcrt4",
-    "/data/Downloads/dsound",
-    "/data/Downloads/dinput",
-    "/data/Downloads/dinput8",
-    "/data/Downloads/winmm",
-    "/data/Downloads/wininet",
-    "/data/Downloads/wsock32",
-    "/data/Downloads/version",
-    "/data/Downloads/ifc22",
-    "/data/Downloads/d3d8",
-    "/data/Downloads/kernelbase(1)",
-    // API forwarding DLLs (api-ms-win-*)
-    "/data/Downloads/api-ms-win-core-apiquery-l1-1-0",
-    "/data/Downloads/api-ms-win-core-console-l1-1-0",
-    "/data/Downloads/api-ms-win-core-datetime-l1-1-0",
-    "/data/Downloads/api-ms-win-core-errorhandling-l1-1-1",
-    "/data/Downloads/api-ms-win-core-namedpipe-l1-1-0",
-    "/data/Downloads/api-ms-win-core-processthreads-l1-1-0",
-    "/data/Downloads/api-ms-win-core-processthreads-l1-1-2",
-    "/data/Downloads/api-ms-win-core-profile-l1-1-0",
-    "/data/Downloads/api-ms-win-core-rtlsupport-l1-1-0",
-    "/data/Downloads/api-ms-win-core-synch-ansi-l1-1-0",
-    "/data/Downloads/api-ms-win-core-synch-l1-1-0",
-    "/data/Downloads/api-ms-win-core-synch-l1-2-0",
-    "/data/Downloads/api-ms-win-core-sysinfo-l1-1-0",
-    "/data/Downloads/api-ms-win-core-sysinfo-l1-2-1",
-    "/data/Downloads/api-ms-win-core-util-l1-1-0",
-]);
+const exe = new EXEFile(exePath, []);
 
 console.log(`Entry point RVA: 0x${exe.optionalHeader.addressOfEntryPoint.toString(16)}`);
 console.log(`Image base: 0x${exe.optionalHeader.imageBase.toString(16)}`);
