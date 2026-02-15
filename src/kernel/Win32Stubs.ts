@@ -19,8 +19,26 @@
 import type { CPU } from "../hardware/CPU.ts";
 import { REG } from "../hardware/CPU.ts";
 import type { Memory } from "../hardware/Memory.ts";
-import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from "fs";
-import { join } from "path";
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync, readdirSync } from "fs";
+import { join, dirname, basename } from "path";
+
+/**
+ * Case-insensitive file lookup for Linux (Windows paths are case-insensitive).
+ * Returns the real on-disk path if found (any case), or null if not found.
+ */
+function findFileCI(linuxPath: string): string | null {
+    if (existsSync(linuxPath)) return linuxPath; // exact match fast path
+    const dir = dirname(linuxPath);
+    const name = basename(linuxPath).toLowerCase();
+    try {
+        const entries = readdirSync(dir);
+        const match = entries.find(e => e.toLowerCase() === name);
+        if (match) return join(dir, match);
+    } catch {
+        // directory doesn't exist or can't be read
+    }
+    return null;
+}
 
 // Registry value type used by stub handlers
 type RegistryEntry = { type: number; value: string | number };
@@ -745,10 +763,11 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
         const hasSeparator = name.includes("\\") || name.includes("/");
         if (hasSeparator) {
-            // Path given — check the filesystem, prompt if missing
+            // Path given — check the filesystem (case-insensitive), prompt if missing
             let linuxPath = translateWindowsPath(name);
             while (true) {
-                if (existsSync(linuxPath)) {
+                const realPath = findFileCI(linuxPath);
+                if (realPath !== null) {
                     console.log(`  [Win32] LoadLibraryA("${name}") -> found`);
                     const hash = name.toLowerCase().split("").reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0) >>> 0;
                     cpu.regs[REG.EAX] = (hash & 0x7FFFFFFF) | 0x10000000;
@@ -1525,6 +1544,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     }
 
     // Read one line from the controlling terminal synchronously (blocking).
+    // Returns "c" (skip/continue) if no terminal is available.
     function readLineTTY(): string {
         let line = "";
         const buf = Buffer.alloc(1);
@@ -1533,11 +1553,14 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
             fd = openSync("/dev/tty", "r");
             while (true) {
                 const n = readSync(fd, buf, 0, 1, null);
-                if (n === 0) break;
+                if (n === 0) break; // EOF
                 const ch = buf.toString("ascii", 0, 1);
                 if (ch === "\n") break;
                 line += ch;
             }
+        } catch {
+            // No controlling terminal (e.g. piped/non-interactive) — default to skip
+            return "c";
         } finally {
             if (fd >= 0) closeSync(fd);
         }
@@ -1580,10 +1603,11 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         }
         let linuxPath = translateWindowsPath(winName);
         while (true) {
-            if (existsSync(linuxPath)) {
+            const realPath = findFileCI(linuxPath);
+            if (realPath !== null) {
                 try {
-                    const data = readFileSync(linuxPath);
-                    fileHandleMap.set(handle, { path: linuxPath, data, position: 0, writable: false });
+                    const data = readFileSync(realPath);
+                    fileHandleMap.set(handle, { path: realPath, data, position: 0, writable: false });
                     console.log(`  [FileIO] CreateFile("${winName}") -> 0x${handle.toString(16)} [read, ${data.length} bytes]`);
                     return handle;
                 } catch {
@@ -1712,9 +1736,10 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
         const name = readCString(namePtr);
         const linuxPath = translateWindowsPath(name);
-        if (existsSync(linuxPath)) {
+        const realPath = findFileCI(linuxPath);
+        if (realPath !== null) {
             try {
-                const st = statSync(linuxPath);
+                const st = statSync(realPath);
                 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
                 const FILE_ATTRIBUTE_NORMAL    = 0x80;
                 cpu.regs[REG.EAX] = st.isDirectory() ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
