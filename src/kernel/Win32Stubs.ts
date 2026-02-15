@@ -19,7 +19,7 @@
 import type { CPU } from "../hardware/CPU.ts";
 import { REG } from "../hardware/CPU.ts";
 import type { Memory } from "../hardware/Memory.ts";
-import { readFileSync, existsSync, statSync } from "fs";
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from "fs";
 import { join } from "path";
 
 // Registry value type used by stub handlers
@@ -54,6 +54,45 @@ function loadRegistryJson(): RegistryMap {
         return {};
     }
 }
+
+// ── Emulator config (emulator.json) ──────────────────────────────────────────
+
+type EmulatorConfig = {
+    /** Windows path prefix → Linux path prefix (e.g. "C:\\" → "/home/user/mco/") */
+    pathMappings: Record<string, string>;
+    /** When true, pause and prompt the user when a requested file is not found */
+    interactiveOnMissingFile: boolean;
+};
+
+/**
+ * Load emulator.json from the project root. Returns safe defaults on error.
+ * pathMappings keys are normalised to use "/" and lower-cased for matching.
+ */
+function loadEmulatorConfig(): EmulatorConfig {
+    try {
+        const filePath = join(process.cwd(), "emulator.json");
+        const raw = readFileSync(filePath, "utf8");
+        const data = JSON.parse(raw) as Record<string, unknown>;
+        // Build mappings, skip keys starting with "_"
+        const raw_mappings = (data["pathMappings"] ?? {}) as Record<string, string>;
+        const pathMappings: Record<string, string> = {};
+        for (const [win, linux] of Object.entries(raw_mappings)) {
+            if (win.startsWith("_")) continue;
+            // Normalise: backslashes → forward slash, lowercase
+            pathMappings[win.replace(/\\/g, "/").toLowerCase()] = linux;
+        }
+        const interactive = data["interactiveOnMissingFile"] === true;
+        console.log(`[EmulatorConfig] Loaded ${Object.keys(pathMappings).length} path mapping(s) from emulator.json`);
+        return { pathMappings, interactiveOnMissingFile: interactive };
+    } catch (e: any) {
+        console.warn(`[EmulatorConfig] Could not load emulator.json: ${e.message} — using defaults`);
+        return { pathMappings: {}, interactiveOnMissingFile: false };
+    }
+}
+
+const emulatorConfig = loadEmulatorConfig();
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Stub region: 0x00200000 - 0x002FFFFF (1MB reserved)
 const STUB_BASE = 0x00200000;
@@ -1427,15 +1466,36 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     // The game is installed at C:\MCity\ which maps to /home/drazisil/mco-source/MCity/
     function translateWindowsPath(winPath: string): string {
         let p = winPath.replace(/\\/g, "/");
-        if (/^[cC]:\//.test(p)) {
-            p = "/home/drazisil/mco-source/" + p.substring(3);
-        } else if (/^[a-zA-Z]:\//.test(p)) {
-            // Unknown drive - try relative to game dir
-            p = "/home/drazisil/mco-source/MCity/" + p.substring(3);
+        // Sort longest-first so more-specific prefixes match before shorter ones
+        const mappings = Object.entries(emulatorConfig.pathMappings)
+            .sort((a, b) => b[0].length - a[0].length);
+        for (const [winPrefix, linuxPrefix] of mappings) {
+            if (p.toLowerCase().startsWith(winPrefix)) {
+                return (linuxPrefix + p.substring(winPrefix.length)).replace(/\/+/g, "/");
+            }
         }
-        // Normalize any double slashes
-        p = p.replace(/\/+/g, "/");
-        return p;
+        // No mapping matched — return with normalized slashes
+        return p.replace(/\/+/g, "/");
+    }
+
+    // Read one line from the controlling terminal synchronously (blocking).
+    function readLineTTY(): string {
+        let line = "";
+        const buf = Buffer.alloc(1);
+        let fd = -1;
+        try {
+            fd = openSync("/dev/tty", "r");
+            while (true) {
+                const n = readSync(fd, buf, 0, 1, null);
+                if (n === 0) break;
+                const ch = buf.toString("ascii", 0, 1);
+                if (ch === "\n") break;
+                line += ch;
+            }
+        } finally {
+            if (fd >= 0) closeSync(fd);
+        }
+        return line.trim();
     }
 
     // Read a null-terminated ANSI string from memory
@@ -1462,7 +1522,9 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         return s;
     }
 
-    // Open a file by Windows path; returns a handle or INVALID_HANDLE_VALUE
+    // Open a file by Windows path; returns a handle or INVALID_HANDLE_VALUE.
+    // When emulatorConfig.interactiveOnMissingFile is true, pauses and prompts
+    // the user to add the missing file and retry, or skip.
     function openFileHandle(winName: string, writable: boolean): number {
         const handle = nextFileHandle++;
         if (writable) {
@@ -1470,20 +1532,36 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
             console.log(`  [FileIO] CreateFile("${winName}") -> 0x${handle.toString(16)} [write]`);
             return handle;
         }
-        const linuxPath = translateWindowsPath(winName);
-        if (existsSync(linuxPath)) {
-            try {
-                const data = readFileSync(linuxPath);
-                fileHandleMap.set(handle, { path: linuxPath, data, position: 0, writable: false });
-                console.log(`  [FileIO] CreateFile("${winName}") -> 0x${handle.toString(16)} [read, ${data.length} bytes]`);
-                return handle;
-            } catch {
-                console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (read error)`);
+        let linuxPath = translateWindowsPath(winName);
+        while (true) {
+            if (existsSync(linuxPath)) {
+                try {
+                    const data = readFileSync(linuxPath);
+                    fileHandleMap.set(handle, { path: linuxPath, data, position: 0, writable: false });
+                    console.log(`  [FileIO] CreateFile("${winName}") -> 0x${handle.toString(16)} [read, ${data.length} bytes]`);
+                    return handle;
+                } catch {
+                    console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (read error)`);
+                    return 0xFFFFFFFF;
+                }
+            }
+            if (!emulatorConfig.interactiveOnMissingFile) {
+                console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (not found: ${linuxPath})`);
                 return 0xFFFFFFFF;
             }
+            // Interactive prompt — pause emulation so user can add the file
+            process.stdout.write(`\n[FileIO] File not found: ${linuxPath}\n`);
+            process.stdout.write(`  Add the file then press Enter to retry, or type 'c' to continue without it.\n`);
+            process.stdout.write(`  > `);
+            const answer = readLineTTY().toLowerCase();
+            if (answer !== "c") {
+                // Re-translate in case the user edited emulator.json
+                linuxPath = translateWindowsPath(winName);
+                continue;
+            }
+            console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (user skipped)`);
+            return 0xFFFFFFFF;
         }
-        console.log(`  [FileIO] CreateFile("${winName}") -> INVALID (not found: ${linuxPath})`);
-        return 0xFFFFFFFF;
     }
 
     // CreateFileA(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) -> HANDLE
