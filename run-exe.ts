@@ -156,8 +156,10 @@ for (const section of exe.sectionHeaders) {
 }
 
 // DLL ranges
+console.log("\n=== DLL Address Mappings ===");
 for (const mapping of exe.importResolver.getAddressMappings()) {
     validRanges.push([mapping.baseAddress, mapping.endAddress, `dll:${mapping.dllName}`]);
+    console.log(`  0x${mapping.baseAddress.toString(16).padStart(8,'0')}-0x${mapping.endAddress.toString(16).padStart(8,'0')} ${mapping.dllName}`);
 }
 
 // Stub region
@@ -176,7 +178,7 @@ function isValidEIP(eip: number): string | null {
     return null;
 }
 
-cpu.enableTrace(200);
+cpu.enableTrace(5000);
 
 let lastValidStep = 0;
 let lastValidEIP = 0;
@@ -185,7 +187,7 @@ let detectedRunaway = false;
 
 try {
     // Custom run loop with EIP validity checking
-    const maxSteps = 10_000_000;
+    const maxSteps = 500_000_000;
     let stepCount = 0;
     while (!cpu.halted && stepCount < maxSteps) {
         const eipBefore = cpu.eip;

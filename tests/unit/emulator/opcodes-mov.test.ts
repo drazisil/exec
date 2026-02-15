@@ -1,8 +1,8 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { CPU, REG } from '#hardware/CPU.ts';
-import { Memory } from '#hardware/Memory.ts';
-import { registerAllOpcodes } from '#emulator/opcodes.ts';
+import { CPU, REG } from '#hardware/CPU';
+import { Memory } from '#hardware/Memory';
+import { registerAllOpcodes } from '#emulator/opcodes';
 
 describe('MOV opcodes', () => {
   let mem: Memory;

@@ -659,6 +659,28 @@ function registerArithmetic(cpu: CPU): void {
         }
     });
 
+    // LES r32, m16:32 - Load ES and register from far pointer (in flat model: load 32-bit value, ignore ES)
+    cpu.register(0xC4, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const resolved = cpu.resolveRM(mod, rm);
+        if (!resolved.isReg) {
+            const addr = cpu.applySegmentOverride(resolved.addr);
+            cpu.regs[reg] = cpu.memory.read32(addr);
+            // ES segment selector at addr+4 ignored (flat model)
+        }
+    });
+
+    // LDS r32, m16:32 - Load DS and register from far pointer (in flat model: load 32-bit value, ignore DS)
+    cpu.register(0xC5, (cpu) => {
+        const { mod, reg, rm } = cpu.decodeModRM();
+        const resolved = cpu.resolveRM(mod, rm);
+        if (!resolved.isReg) {
+            const addr = cpu.applySegmentOverride(resolved.addr);
+            cpu.regs[reg] = cpu.memory.read32(addr);
+            // DS segment selector at addr+4 ignored (flat model)
+        }
+    });
+
     // RET imm16 (return and pop imm16 bytes from stack)
     cpu.register(0xC2, (cpu) => {
         const retAddr = cpu.pop32();
@@ -1102,6 +1124,31 @@ function registerStack(cpu: CPU): void {
             cpu.regs[r] = cpu.pop32();
         });
     }
+
+    // PUSHAD (0x60) - Push all 32-bit general-purpose registers
+    cpu.register(0x60, (cpu) => {
+        const temp = cpu.regs[REG.ESP];
+        cpu.push32(cpu.regs[REG.EAX]);
+        cpu.push32(cpu.regs[REG.ECX]);
+        cpu.push32(cpu.regs[REG.EDX]);
+        cpu.push32(cpu.regs[REG.EBX]);
+        cpu.push32(temp); // original ESP value
+        cpu.push32(cpu.regs[REG.EBP]);
+        cpu.push32(cpu.regs[REG.ESI]);
+        cpu.push32(cpu.regs[REG.EDI]);
+    });
+
+    // POPAD (0x61) - Pop all 32-bit general-purpose registers
+    cpu.register(0x61, (cpu) => {
+        cpu.regs[REG.EDI] = cpu.pop32();
+        cpu.regs[REG.ESI] = cpu.pop32();
+        cpu.regs[REG.EBP] = cpu.pop32();
+        cpu.pop32(); // skip ESP (discarded)
+        cpu.regs[REG.EBX] = cpu.pop32();
+        cpu.regs[REG.EDX] = cpu.pop32();
+        cpu.regs[REG.ECX] = cpu.pop32();
+        cpu.regs[REG.EAX] = cpu.pop32();
+    });
 
     // PUSH imm32
     cpu.register(0x68, (cpu) => {
@@ -1643,6 +1690,176 @@ function registerStringOps(cpu: CPU): void {
             cpu.updateFlagsArith((src | 0) - (dst | 0), src, dst, true);
             cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + dir4) >>> 0;
             cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + dir4) >>> 0;
+        }
+    });
+}
+
+// ============================================================
+// I/O Instructions
+// ============================================================
+
+function registerIOPorts(cpu: CPU): void {
+    // I/O port access helpers - return 8, 16, or 32-bit port value
+    const readPort = (port: number, size: number): number => {
+        // Stub: always return zero for I/O port reads
+        console.log(`[I/O] IN from port 0x${port.toString(16)}, size ${size}`);
+        return 0;
+    };
+
+    const writePort = (port: number, val: number, size: number): void => {
+        // Stub: I/O port writes
+        console.log(`[I/O] OUT to port 0x${port.toString(16)}, value 0x${val.toString(16)}, size ${size}`);
+    };
+
+    // IN AL, DX - read byte from port DX into AL
+    cpu.register(0xEC, (cpu) => {
+        cpu.regs[REG.EAX] = (cpu.regs[REG.EAX] & 0xFFFFFF00) | readPort(cpu.regs[REG.EDX] & 0xFFFF, 1);
+    });
+
+    // IN AX, DX - read word from port DX into AX
+    cpu.register(0xED, (cpu) => {
+        const port = cpu.regs[REG.EDX] & 0xFFFF;
+        cpu.regs[REG.EAX] = readPort(port, 2) | (readPort(port + 1, 2) << 16);
+    });
+
+    // OUT DX, AL - write AL to port DX
+    cpu.register(0xEE, (cpu) => {
+        writePort(cpu.regs[REG.EDX] & 0xFFFF, cpu.regs[REG.EAX] & 0xFF, 1);
+    });
+
+    // OUT DX, AX - write AX to port DX
+    cpu.register(0xEF, (cpu) => {
+        const port = cpu.regs[REG.EDX] & 0xFFFF;
+        writePort(port, cpu.regs[REG.EAX] & 0xFFFF, 2);
+    });
+
+    // INSB / INS / INSB - Input String (byte)
+    cpu.register(0x6C, (cpu) => {
+        const rep = cpu.repPrefix;
+        const size = cpu.operandSizeOverride ? 2 : 1;
+        const inc = cpu.getFlag(FLAG.DF) ? -size : size;
+        const es = cpu.segments.ES;
+
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const port = cpu.regs[REG.EDX] & 0xFFFF;
+                const val = readPort(port, size);
+                if (size === 1) {
+                    cpu.memory.write8(es + cpu.regs[REG.EDI], val);
+                    cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+                } else {
+                    cpu.memory.write16(es + cpu.regs[REG.EDI], val);
+                    cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+                }
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            const port = cpu.regs[REG.EDX] & 0xFFFF;
+            const val = readPort(port, size);
+            if (size === 1) {
+                cpu.memory.write8(es + cpu.regs[REG.EDI], val);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+            } else {
+                cpu.memory.write16(es + cpu.regs[REG.EDI], val);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+            }
+        }
+    });
+
+    // INS (byte) - Input String (byte, implicit DX port)
+    cpu.register(0x6D, (cpu) => {
+        const rep = cpu.repPrefix;
+        const size = cpu.operandSizeOverride ? 2 : 1;
+        const inc = cpu.getFlag(FLAG.DF) ? -size : size;
+        const es = cpu.segments.ES;
+
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                const port = cpu.regs[REG.EDX] & 0xFFFF;
+                const val = readPort(port, size);
+                if (size === 1) {
+                    cpu.memory.write8(es + cpu.regs[REG.EDI], val);
+                    cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+                } else {
+                    cpu.memory.write16(es + cpu.regs[REG.EDI], val);
+                    cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+                }
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            const port = cpu.regs[REG.EDX] & 0xFFFF;
+            const val = readPort(port, size);
+            if (size === 1) {
+                cpu.memory.write8(es + cpu.regs[REG.EDI], val);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+            } else {
+                cpu.memory.write16(es + cpu.regs[REG.EDI], val);
+                cpu.regs[REG.EDI] = (cpu.regs[REG.EDI] + inc) >>> 0;
+            }
+        }
+    });
+
+    // OUTSB / OUTS / OUTSB - Output String (byte)
+    cpu.register(0x6E, (cpu) => {
+        const rep = cpu.repPrefix;
+        const size = cpu.operandSizeOverride ? 2 : 1;
+        const inc = cpu.getFlag(FLAG.DF) ? -size : size;
+
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                if (size === 1) {
+                    const val = cpu.memory.read8(cpu.regs[REG.ESI]);
+                    cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                    writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 1);
+                } else {
+                    const val = cpu.memory.read16(cpu.regs[REG.ESI]);
+                    cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                    writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 2);
+                }
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            if (size === 1) {
+                const val = cpu.memory.read8(cpu.regs[REG.ESI]);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 1);
+            } else {
+                const val = cpu.memory.read16(cpu.regs[REG.ESI]);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 2);
+            }
+        }
+    });
+
+    // OUTS (byte) - Output String (byte, implicit DX port)
+    cpu.register(0x6F, (cpu) => {
+        const rep = cpu.repPrefix;
+        const size = cpu.operandSizeOverride ? 2 : 1;
+        const inc = cpu.getFlag(FLAG.DF) ? -size : size;
+
+        if (rep === "REP") {
+            while ((cpu.regs[REG.ECX] >>> 0) !== 0) {
+                if (size === 1) {
+                    const val = cpu.memory.read8(cpu.regs[REG.ESI]);
+                    cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                    writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 1);
+                } else {
+                    const val = cpu.memory.read16(cpu.regs[REG.ESI]);
+                    cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                    writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 2);
+                }
+                cpu.regs[REG.ECX] = (cpu.regs[REG.ECX] - 1) >>> 0;
+            }
+        } else {
+            if (size === 1) {
+                const val = cpu.memory.read8(cpu.regs[REG.ESI]);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 1);
+            } else {
+                const val = cpu.memory.read16(cpu.regs[REG.ESI]);
+                cpu.regs[REG.ESI] = (cpu.regs[REG.ESI] + inc) >>> 0;
+                writePort(cpu.regs[REG.EDX] & 0xFFFF, val, 2);
+            }
         }
     });
 }

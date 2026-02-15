@@ -14,7 +14,7 @@
   "scripts": {
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
-    "build": "tsc",
+    "build": "tsc && tsc -p tsconfig.test.json && cp -r tests dist/tests",
     "run": "node run-exe.ts",
     "test": "node --test --test-reporter spec 'tests/**/*.test.ts'",
     "test:watch": "node --test --watch 'tests/**/*.test.ts'",

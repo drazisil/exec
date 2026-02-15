@@ -19,6 +19,41 @@
 import type { CPU } from "../hardware/CPU.ts";
 import { REG } from "../hardware/CPU.ts";
 import type { Memory } from "../hardware/Memory.ts";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+// Registry value type used by stub handlers
+type RegistryEntry = { type: number; value: string | number };
+type RegistryMap = Record<string, Record<string, RegistryEntry>>;
+
+/**
+ * Load fake registry values from registry.json in the project root.
+ * Keys and value names are normalized to lowercase. Returns an empty map on error.
+ */
+function loadRegistryJson(): RegistryMap {
+    try {
+        const filePath = join(process.cwd(), "registry.json");
+        const raw = readFileSync(filePath, "utf8");
+        const data = JSON.parse(raw) as Record<string, unknown>;
+        const result: RegistryMap = {};
+        for (const [key, values] of Object.entries(data)) {
+            if (key.startsWith("_")) continue; // skip comment/meta keys
+            if (typeof values !== "object" || values === null) continue;
+            const normalizedKey = key.toLowerCase().replace(/\//g, "\\");
+            result[normalizedKey] = {};
+            for (const [vname, entry] of Object.entries(values as Record<string, unknown>)) {
+                if (typeof entry === "object" && entry !== null && "type" in entry && "value" in entry) {
+                    result[normalizedKey][vname.toLowerCase()] = entry as RegistryEntry;
+                }
+            }
+        }
+        console.log(`[Registry] Loaded ${Object.keys(result).length} keys from registry.json`);
+        return result;
+    } catch (e: any) {
+        console.warn(`[Registry] Could not load registry.json: ${e.message}`);
+        return {};
+    }
+}
 
 // Stub region: 0x00200000 - 0x002FFFFF (1MB reserved)
 const STUB_BASE = 0x00200000;
@@ -30,7 +65,7 @@ const STUB_INT = 0xFE;
 
 export type StubHandler = (cpu: CPU) => void;
 
-interface StubEntry {
+export interface StubEntry {
     name: string;       // e.g. "kernel32.dll!GetVersion"
     dllName: string;    // e.g. "kernel32.dll"
     funcName: string;   // e.g. "GetVersion"
@@ -232,6 +267,17 @@ export class Win32Stubs {
     }
 
     /**
+     * Find a stub entry by function name (searching across all DLL registrations).
+     * Returns the entry if found, or null.
+     */
+    findStubByFuncName(funcName: string): StubEntry | null {
+        for (const entry of this._stubById) {
+            if (entry.funcName === funcName) return entry;
+        }
+        return null;
+    }
+
+    /**
      * Get total number of registered stubs
      */
     get count(): number {
@@ -424,9 +470,12 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // Bump allocator for heap/local/global allocations
     let nextHeapAlloc = 0x04000000; // heap starts at 64MB
+    // Track allocation sizes for HeapReAlloc data copy
+    const heapAllocSizes = new Map<number, number>();
     function simpleAlloc(size: number): number {
         const addr = nextHeapAlloc;
         nextHeapAlloc = ((nextHeapAlloc + size + 15) & ~15) >>> 0;
+        heapAllocSizes.set(addr, size);
         return addr;
     }
 
@@ -437,6 +486,7 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         const addr = nextHeapAlloc;
         // Align to 16 bytes
         nextHeapAlloc = ((nextHeapAlloc + dwBytes + 15) & ~15) >>> 0;
+        heapAllocSizes.set(addr, dwBytes);
         // HEAP_ZERO_MEMORY = 0x08
         if (dwFlags & 0x08) {
             for (let i = 0; i < dwBytes; i += 4) {
@@ -455,10 +505,20 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // HeapReAlloc(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem, SIZE_T dwBytes) -> LPVOID
     stubs.registerStub("kernel32.dll", "HeapReAlloc", (cpu) => {
+        const lpMem = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
         const dwBytes = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
-        const addr = nextHeapAlloc;
+        const newAddr = nextHeapAlloc;
         nextHeapAlloc = ((nextHeapAlloc + dwBytes + 15) & ~15) >>> 0;
-        cpu.regs[REG.EAX] = addr;
+        heapAllocSizes.set(newAddr, dwBytes);
+        // Copy old data to new location (critical for correctness!)
+        if (lpMem !== 0) {
+            const oldSize = heapAllocSizes.get(lpMem) ?? 0;
+            const copySize = Math.min(oldSize, dwBytes);
+            for (let i = 0; i < copySize; i++) {
+                memory.write8(newAddr + i, memory.read8(lpMem + i));
+            }
+        }
+        cpu.regs[REG.EAX] = newAddr;
         cleanupStdcall(cpu, memory, 16);
     });
 
@@ -975,8 +1035,8 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
                 cpu.eflags = 0x202; // IF set
             }
 
-            // Run thread for a time slice (100K steps)
-            const threadStepLimit = 100_000;
+            // Run thread for a time slice (1M steps)
+            const threadStepLimit = 1_000_000;
             cpu.halted = false;
             let threadSteps = 0;
             let threadError: Error | null = null;
@@ -1351,19 +1411,37 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
 
     // =============== File I/O ===============
 
+    // File handle counter for fake handles (starts at 0x5000)
+    let nextFileHandle = 0x5000;
+
     // CreateFileA(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) -> HANDLE
     stubs.registerStub("kernel32.dll", "CreateFileA", (cpu) => {
         const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const dwDesiredAccess = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
         let name = "";
         for (let i = 0; i < 260; i++) { const ch = memory.read8(namePtr + i); if (ch === 0) break; name += String.fromCharCode(ch); }
-        console.log(`  [Win32] CreateFileA("${name}")`);
-        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE (file not found)
+        const GENERIC_WRITE = 0x40000000;
+        const GENERIC_READ_WRITE = 0xC0000000;
+        if (dwDesiredAccess & GENERIC_WRITE || dwDesiredAccess === GENERIC_READ_WRITE) {
+            const handle = nextFileHandle++;
+            console.log(`  [Win32] CreateFileA("${name}") -> handle 0x${handle.toString(16)}`);
+            cpu.regs[REG.EAX] = handle;
+        } else {
+            console.log(`  [Win32] CreateFileA("${name}") -> INVALID_HANDLE_VALUE (read-only not supported)`);
+            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
+        }
         cleanupStdcall(cpu, memory, 28);
     });
 
     // CreateFileW(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE) -> HANDLE
     stubs.registerStub("kernel32.dll", "CreateFileW", (cpu) => {
-        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
+        const dwDesiredAccess = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const GENERIC_WRITE = 0x40000000;
+        if (dwDesiredAccess & GENERIC_WRITE) {
+            cpu.regs[REG.EAX] = nextFileHandle++;
+        } else {
+            cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
+        }
         cleanupStdcall(cpu, memory, 28);
     });
 
@@ -1373,6 +1451,58 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         if (lpBytesRead !== 0) memory.write32(lpBytesRead, 0);
         cpu.regs[REG.EAX] = 0; // FALSE (failed)
         cleanupStdcall(cpu, memory, 20);
+    });
+
+    // DeleteFileA(LPCSTR lpFileName) -> BOOL
+    stubs.registerStub("kernel32.dll", "DeleteFileA", (cpu) => {
+        const namePtr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        let name = "";
+        for (let i = 0; i < 260; i++) { const ch = memory.read8(namePtr + i); if (ch === 0) break; name += String.fromCharCode(ch); }
+        console.log(`  [Win32] DeleteFileA("${name}")`);
+        cpu.regs[REG.EAX] = 1; // TRUE (success)
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // DeleteFileW(LPCWSTR lpFileName) -> BOOL
+    stubs.registerStub("kernel32.dll", "DeleteFileW", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE (success)
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // FindFirstFileA(LPCSTR, WIN32_FIND_DATAA*) -> HANDLE
+    stubs.registerStub("kernel32.dll", "FindFirstFileA", (cpu) => {
+        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE (no files found)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // FindFirstFileW(LPCWSTR, WIN32_FIND_DATAW*) -> HANDLE
+    stubs.registerStub("kernel32.dll", "FindFirstFileW", (cpu) => {
+        cpu.regs[REG.EAX] = 0xFFFFFFFF; // INVALID_HANDLE_VALUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // FindNextFileA(HANDLE, WIN32_FIND_DATAA*) -> BOOL
+    stubs.registerStub("kernel32.dll", "FindNextFileA", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // FALSE (no more files)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // FindNextFileW(HANDLE, WIN32_FIND_DATAW*) -> BOOL
+    stubs.registerStub("kernel32.dll", "FindNextFileW", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // FALSE (no more files)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // FindClose(HANDLE hFindFile) -> BOOL
+    stubs.registerStub("kernel32.dll", "FindClose", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE (success)
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // CompareFileTime(const FILETIME*, const FILETIME*) -> LONG
+    stubs.registerStub("kernel32.dll", "CompareFileTime", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // Equal
+        cleanupStdcall(cpu, memory, 8);
     });
 
     // GetFileAttributesA(LPCSTR lpFileName) -> DWORD
@@ -1583,6 +1713,50 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
     stubs.registerStub("kernel32.dll", "_lclose", (cpu) => {
         cpu.regs[REG.EAX] = 0; // success
         cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetPrivateProfileStringA(lpAppName, lpKeyName, lpDefault, lpReturnedString, nSize, lpFileName) -> DWORD
+    stubs.registerStub("kernel32.dll", "GetPrivateProfileStringA", (cpu) => {
+        const lpAppName = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpKeyName = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const lpDefault = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const lpReturnedString = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        const nSize = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        const lpFileName = memory.read32((cpu.regs[REG.ESP] + 24) >>> 0);
+        const app = lpAppName ? readAnsiStr(lpAppName) : "(null)";
+        const key = lpKeyName ? readAnsiStr(lpKeyName) : "(null)";
+        const file = lpFileName ? readAnsiStr(lpFileName) : "(null)";
+        // Return the default value (indicates key not found)
+        let defStr = "";
+        if (lpDefault) defStr = readAnsiStr(lpDefault);
+        console.log(`  [Win32] GetPrivateProfileStringA("[${app}]", "${key}", default="${defStr}", file="${file}")`);
+        if (lpReturnedString && nSize > 0) {
+            const copyLen = Math.min(defStr.length, nSize - 1);
+            for (let i = 0; i < copyLen; i++) memory.write8(lpReturnedString + i, defStr.charCodeAt(i));
+            memory.write8(lpReturnedString + copyLen, 0);
+            cpu.regs[REG.EAX] = copyLen;
+        } else {
+            cpu.regs[REG.EAX] = 0;
+        }
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // GetPrivateProfileIntA(lpAppName, lpKeyName, nDefault, lpFileName) -> UINT
+    stubs.registerStub("kernel32.dll", "GetPrivateProfileIntA", (cpu) => {
+        const lpAppName = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpKeyName = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const nDefault = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const app = lpAppName ? readAnsiStr(lpAppName) : "(null)";
+        const key = lpKeyName ? readAnsiStr(lpKeyName) : "(null)";
+        console.log(`  [Win32] GetPrivateProfileIntA("[${app}]", "${key}") -> default ${nDefault}`);
+        cpu.regs[REG.EAX] = nDefault; // return the default value
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // WritePrivateProfileStringA(lpAppName, lpKeyName, lpString, lpFileName) -> BOOL
+    stubs.registerStub("kernel32.dll", "WritePrivateProfileStringA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE (pretend write succeeded)
+        cleanupStdcall(cpu, memory, 16);
     });
 
     // WritePrivateProfileSectionA(LPCSTR, LPCSTR, LPCSTR) -> BOOL
@@ -1977,6 +2151,700 @@ export function registerCRTStartupStubs(stubs: Win32Stubs, memory: Memory): void
         const hWnd = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
         cpu.regs[REG.EAX] = hWnd;
         cleanupStdcall(cpu, memory, 4);
+    });
+
+    // DialogBoxParamA(hInstance, lpTemplateName, hWndParent, lpDialogFunc, dwInitParam) -> INT_PTR
+    stubs.registerStub("user32.dll", "DialogBoxParamA", (cpu) => {
+        const lpTemplateName = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        let name = lpTemplateName > 0xFFFF ? "" : `#${lpTemplateName}`;
+        if (lpTemplateName > 0xFFFF) {
+            for (let i = 0; i < 64; i++) { const c = memory.read8(lpTemplateName + i); if (!c) break; name += String.fromCharCode(c); }
+        }
+        console.log(`  [Win32] DialogBoxParamA("${name}") -> IDOK`);
+        cpu.regs[REG.EAX] = 1; // IDOK=1
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // DialogBoxParamW(hInstance, lpTemplateName, hWndParent, lpDialogFunc, dwInitParam) -> INT_PTR
+    stubs.registerStub("user32.dll", "DialogBoxParamW", (cpu) => {
+        console.log(`  [Win32] DialogBoxParamW() -> 0`);
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // DialogBoxIndirectParamA(hInstance, hDialogTemplate, hWndParent, lpDialogFunc, dwInitParam) -> INT_PTR
+    stubs.registerStub("user32.dll", "DialogBoxIndirectParamA", (cpu) => {
+        console.log(`  [Win32] DialogBoxIndirectParamA() -> 0`);
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // CreateDialogParamA(hInstance, lpTemplateName, hWndParent, lpDialogFunc, dwInitParam) -> HWND
+    stubs.registerStub("user32.dll", "CreateDialogParamA", (cpu) => {
+        console.log(`  [Win32] CreateDialogParamA() -> 0`);
+        cpu.regs[REG.EAX] = 0; // NULL (failure)
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // EndDialog(HWND hDlg, INT_PTR nResult) -> BOOL
+    stubs.registerStub("user32.dll", "EndDialog", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // RegisterClassA(WNDCLASSA*) -> ATOM
+    stubs.registerStub("user32.dll", "RegisterClassA", (cpu) => {
+        cpu.regs[REG.EAX] = 0xC001; // fake ATOM
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // RegisterClassExA(WNDCLASSEXA*) -> ATOM
+    stubs.registerStub("user32.dll", "RegisterClassExA", (cpu) => {
+        cpu.regs[REG.EAX] = 0xC001; // fake ATOM
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // RegisterClassW(WNDCLASSW*) -> ATOM
+    stubs.registerStub("user32.dll", "RegisterClassW", (cpu) => {
+        cpu.regs[REG.EAX] = 0xC002; // fake ATOM
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // RegisterClassExW(WNDCLASSEXW*) -> ATOM
+    stubs.registerStub("user32.dll", "RegisterClassExW", (cpu) => {
+        cpu.regs[REG.EAX] = 0xC002; // fake ATOM
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // UnregisterClassA(LPCSTR lpClassName, HINSTANCE hInstance) -> BOOL
+    stubs.registerStub("user32.dll", "UnregisterClassA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // CreateWindowExA(dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam) -> HWND
+    stubs.registerStub("user32.dll", "CreateWindowExA", (cpu) => {
+        const lpClassName = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        let name = "";
+        if (lpClassName > 0xFFFF) { for (let i = 0; i < 64; i++) { const c = memory.read8(lpClassName + i); if (!c) break; name += String.fromCharCode(c); } }
+        else name = `#${lpClassName}`;
+        console.log(`  [Win32] CreateWindowExA("${name}") -> 0xABCD`);
+        cpu.regs[REG.EAX] = 0xABCD; // fake HWND
+        cleanupStdcall(cpu, memory, 48);
+    });
+
+    // CreateWindowExW(dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam) -> HWND
+    stubs.registerStub("user32.dll", "CreateWindowExW", (cpu) => {
+        console.log(`  [Win32] CreateWindowExW() -> 0xABCD`);
+        cpu.regs[REG.EAX] = 0xABCD; // fake HWND
+        cleanupStdcall(cpu, memory, 48);
+    });
+
+    // DestroyWindow(HWND hWnd) -> BOOL
+    stubs.registerStub("user32.dll", "DestroyWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // ShowWindow(HWND hWnd, int nCmdShow) -> BOOL
+    stubs.registerStub("user32.dll", "ShowWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // previously hidden
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // UpdateWindow(HWND hWnd) -> BOOL
+    stubs.registerStub("user32.dll", "UpdateWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SetWindowPos(HWND, HWND, x, y, cx, cy, uFlags) -> BOOL
+    stubs.registerStub("user32.dll", "SetWindowPos", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 28);
+    });
+
+    // GetWindowRect(HWND hWnd, LPRECT lpRect) -> BOOL
+    stubs.registerStub("user32.dll", "GetWindowRect", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // FALSE (no real window)
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetClientRect(HWND hWnd, LPRECT lpRect) -> BOOL
+    stubs.registerStub("user32.dll", "GetClientRect", (cpu) => {
+        const lpRect = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        if (lpRect) { memory.write32(lpRect, 0); memory.write32(lpRect + 4, 0); memory.write32(lpRect + 8, 800); memory.write32(lpRect + 12, 600); }
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // GetSystemMetrics(int nIndex) -> int
+    stubs.registerStub("user32.dll", "GetSystemMetrics", (cpu) => {
+        const nIndex = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        // SM_CXSCREEN=0, SM_CYSCREEN=1
+        if (nIndex === 0) cpu.regs[REG.EAX] = 800;
+        else if (nIndex === 1) cpu.regs[REG.EAX] = 600;
+        else cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetForegroundWindow() -> HWND
+    stubs.registerStub("user32.dll", "GetForegroundWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 0xABCD; // fake HWND
+    });
+
+    // SetForegroundWindow(HWND hWnd) -> BOOL
+    stubs.registerStub("user32.dll", "SetForegroundWindow", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // GetDC(HWND hWnd) -> HDC
+    stubs.registerStub("user32.dll", "GetDC", (cpu) => {
+        cpu.regs[REG.EAX] = 0x1DC; // fake HDC
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // ReleaseDC(HWND hWnd, HDC hDC) -> int
+    stubs.registerStub("user32.dll", "ReleaseDC", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // released
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // PeekMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax, UINT wRemoveMsg) -> BOOL
+    stubs.registerStub("user32.dll", "PeekMessageA", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // FALSE (no messages)
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // GetMessageA(LPMSG lpMsg, HWND hWnd, UINT wMsgFilterMin, UINT wMsgFilterMax) -> BOOL
+    stubs.registerStub("user32.dll", "GetMessageA", (cpu) => {
+        // Return WM_QUIT (0x12) to exit message loops
+        const lpMsg = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (lpMsg) { memory.write32(lpMsg, 0xABCD); memory.write32(lpMsg + 4, 0x12); } // HWND, WM_QUIT
+        cpu.regs[REG.EAX] = 0; // FALSE = WM_QUIT
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // TranslateMessage(MSG*) -> BOOL
+    stubs.registerStub("user32.dll", "TranslateMessage", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // DispatchMessageA(MSG*) -> LRESULT
+    stubs.registerStub("user32.dll", "DispatchMessageA", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // PostQuitMessage(int nExitCode) -> void
+    stubs.registerStub("user32.dll", "PostQuitMessage", (cpu) => {
+        console.log(`  [Win32] PostQuitMessage()`);
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // LoadCursorA(hInstance, lpCursorName) -> HCURSOR
+    stubs.registerStub("user32.dll", "LoadCursorA", (cpu) => {
+        cpu.regs[REG.EAX] = 0x1001; // fake HCURSOR
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // LoadIconA(hInstance, lpIconName) -> HICON
+    stubs.registerStub("user32.dll", "LoadIconA", (cpu) => {
+        cpu.regs[REG.EAX] = 0x1002; // fake HICON
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SetCursor(HCURSOR hCursor) -> HCURSOR
+    stubs.registerStub("user32.dll", "SetCursor", (cpu) => {
+        const prev = cpu.regs[REG.EAX];
+        cpu.regs[REG.EAX] = 0x1001;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // =============== OLEAUT32: BSTR / VARIANT / SafeArray ===============
+    // BSTR layout in memory: [4-byte byte-length] [wide-char data...] [null terminator]
+    // The pointer returned points to the character data, length prefix is at ptr-4.
+
+    // SysAllocString(LPCOLESTR psz) -> BSTR
+    stubs.registerStub("oleaut32.dll", "SysAllocString", (cpu) => {
+        const psz = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (psz === 0) {
+            cpu.regs[REG.EAX] = 0;
+            cleanupStdcall(cpu, memory, 4);
+            return;
+        }
+        let len = 0;
+        while (memory.read16(psz + len * 2) !== 0) len++;
+        const byteLen = len * 2;
+        const block = simpleAlloc(4 + byteLen + 2);
+        memory.write32(block, byteLen);
+        for (let i = 0; i < byteLen + 2; i++) {
+            memory.write8(block + 4 + i, memory.read8(psz + i));
+        }
+        cpu.regs[REG.EAX] = (block + 4) >>> 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SysAllocStringLen(LPCOLESTR psz, UINT len) -> BSTR
+    stubs.registerStub("oleaut32.dll", "SysAllocStringLen", (cpu) => {
+        const psz = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const len = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const byteLen = len * 2;
+        const block = simpleAlloc(4 + byteLen + 2);
+        memory.write32(block, byteLen);
+        if (psz !== 0) {
+            for (let i = 0; i < byteLen; i++) {
+                memory.write8(block + 4 + i, memory.read8(psz + i));
+            }
+        }
+        memory.write16(block + 4 + byteLen, 0);
+        cpu.regs[REG.EAX] = (block + 4) >>> 0;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SysAllocStringByteLen(LPCSTR psz, UINT len) -> BSTR
+    stubs.registerStub("oleaut32.dll", "SysAllocStringByteLen", (cpu) => {
+        const psz = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const len = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const block = simpleAlloc(4 + len + 2);
+        memory.write32(block, len);
+        if (psz !== 0) {
+            for (let i = 0; i < len; i++) {
+                memory.write8(block + 4 + i, memory.read8(psz + i));
+            }
+        }
+        memory.write16(block + 4 + len, 0);
+        cpu.regs[REG.EAX] = (block + 4) >>> 0;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SysReAllocString(BSTR* pbstr, LPCOLESTR psz) -> INT
+    stubs.registerStub("oleaut32.dll", "SysReAllocString", (cpu) => {
+        const pbstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const psz = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        let len = 0;
+        if (psz !== 0) {
+            while (memory.read16(psz + len * 2) !== 0) len++;
+        }
+        const byteLen = len * 2;
+        const block = simpleAlloc(4 + byteLen + 2);
+        memory.write32(block, byteLen);
+        if (psz !== 0) {
+            for (let i = 0; i < byteLen + 2; i++) {
+                memory.write8(block + 4 + i, memory.read8(psz + i));
+            }
+        }
+        memory.write16(block + 4 + byteLen, 0);
+        memory.write32(pbstr, (block + 4) >>> 0);
+        cpu.regs[REG.EAX] = 1;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // SysReAllocStringLen(BSTR* pbstr, LPCOLESTR psz, UINT len) -> INT
+    stubs.registerStub("oleaut32.dll", "SysReAllocStringLen", (cpu) => {
+        const pbstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const psz = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const len = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const byteLen = len * 2;
+        const block = simpleAlloc(4 + byteLen + 2);
+        memory.write32(block, byteLen);
+        if (psz !== 0) {
+            for (let i = 0; i < byteLen; i++) {
+                memory.write8(block + 4 + i, memory.read8(psz + i));
+            }
+        }
+        memory.write16(block + 4 + byteLen, 0);
+        memory.write32(pbstr, (block + 4) >>> 0);
+        cpu.regs[REG.EAX] = 1;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // SysFreeString(BSTR bstr) -> void
+    stubs.registerStub("oleaut32.dll", "SysFreeString", (cpu) => {
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SysStringLen(BSTR bstr) -> UINT (character count)
+    stubs.registerStub("oleaut32.dll", "SysStringLen", (cpu) => {
+        const bstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (bstr === 0) {
+            cpu.regs[REG.EAX] = 0;
+        } else {
+            const byteLen = memory.read32((bstr - 4) >>> 0);
+            cpu.regs[REG.EAX] = (byteLen / 2) >>> 0;
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SysStringByteLen(BSTR bstr) -> UINT (byte count)
+    stubs.registerStub("oleaut32.dll", "SysStringByteLen", (cpu) => {
+        const bstr = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (bstr === 0) {
+            cpu.regs[REG.EAX] = 0;
+        } else {
+            cpu.regs[REG.EAX] = memory.read32((bstr - 4) >>> 0);
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // VariantInit(VARIANTARG *pvarg) -> void
+    stubs.registerStub("oleaut32.dll", "VariantInit", (cpu) => {
+        const pv = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (pv !== 0) {
+            for (let i = 0; i < 16; i++) memory.write8(pv + i, 0);
+        }
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // VariantClear(VARIANTARG *pvarg) -> HRESULT
+    stubs.registerStub("oleaut32.dll", "VariantClear", (cpu) => {
+        const pv = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        if (pv !== 0) {
+            for (let i = 0; i < 16; i++) memory.write8(pv + i, 0);
+        }
+        cpu.regs[REG.EAX] = 0; // S_OK
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // VariantChangeType -> HRESULT
+    stubs.registerStub("oleaut32.dll", "VariantChangeType", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // S_OK
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // SafeArrayCreate -> SAFEARRAY*
+    stubs.registerStub("oleaut32.dll", "SafeArrayCreate", (cpu) => {
+        const vt = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const cDims = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const rgsabound = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const headerSize = 16 + cDims * 8;
+        let totalElements = 1;
+        const elemSize = (vt === 8) ? 4 : 4; // VT_BSTR=4-byte ptrs, default 4
+        for (let d = 0; d < cDims; d++) {
+            totalElements *= memory.read32(rgsabound + d * 8);
+        }
+        const dataSize = totalElements * elemSize;
+        const saBlock = simpleAlloc(headerSize + dataSize);
+        memory.write16(saBlock, cDims);
+        memory.write16(saBlock + 2, 0);
+        memory.write32(saBlock + 4, elemSize);
+        memory.write32(saBlock + 8, 0);
+        memory.write32(saBlock + 12, (saBlock + headerSize) >>> 0);
+        for (let d = 0; d < cDims; d++) {
+            memory.write32(saBlock + 16 + d * 8, memory.read32(rgsabound + d * 8));
+            memory.write32(saBlock + 16 + d * 8 + 4, memory.read32(rgsabound + d * 8 + 4));
+        }
+        for (let i = 0; i < dataSize; i++) memory.write8(saBlock + headerSize + i, 0);
+        cpu.regs[REG.EAX] = saBlock >>> 0;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // SafeArrayGetDim(SAFEARRAY *psa) -> UINT
+    stubs.registerStub("oleaut32.dll", "SafeArrayGetDim", (cpu) => {
+        const psa = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = psa ? memory.read16(psa) : 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SafeArrayGetElemsize(SAFEARRAY *psa) -> UINT
+    stubs.registerStub("oleaut32.dll", "SafeArrayGetElemsize", (cpu) => {
+        const psa = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        cpu.regs[REG.EAX] = psa ? memory.read32(psa + 4) : 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // SafeArrayGetUBound(SAFEARRAY *psa, UINT nDim, LONG *plUbound) -> HRESULT
+    stubs.registerStub("oleaut32.dll", "SafeArrayGetUBound", (cpu) => {
+        const psa = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const nDim = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const plUbound = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        if (psa && plUbound) {
+            const off = 16 + (nDim - 1) * 8;
+            memory.write32(plUbound, (memory.read32(psa + off + 4) + memory.read32(psa + off) - 1) >>> 0);
+        }
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // SafeArrayGetLBound(SAFEARRAY *psa, UINT nDim, LONG *plLbound) -> HRESULT
+    stubs.registerStub("oleaut32.dll", "SafeArrayGetLBound", (cpu) => {
+        const psa = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const nDim = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const plLbound = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        if (psa && plLbound) {
+            memory.write32(plLbound, memory.read32(psa + 16 + (nDim - 1) * 8 + 4));
+        }
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // SafeArrayAccessData(SAFEARRAY *psa, void **ppvData) -> HRESULT
+    stubs.registerStub("oleaut32.dll", "SafeArrayAccessData", (cpu) => {
+        const psa = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const ppvData = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        if (psa && ppvData) memory.write32(ppvData, memory.read32(psa + 12));
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    stubs.registerStub("oleaut32.dll", "SafeArrayUnaccessData", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    stubs.registerStub("oleaut32.dll", "SafeArrayRedim", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    stubs.registerStub("oleaut32.dll", "SafeArrayPutElement", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    stubs.registerStub("oleaut32.dll", "SafeArrayDestroy", (cpu) => {
+        cpu.regs[REG.EAX] = 0;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // =============== OLE32: COM ===============
+
+    stubs.registerStub("ole32.dll", "CoInitialize", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // S_OK
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    stubs.registerStub("ole32.dll", "CoInitializeEx", (cpu) => {
+        cpu.regs[REG.EAX] = 0; // S_OK
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    stubs.registerStub("ole32.dll", "CoUninitialize", (cpu) => {
+        cleanupStdcall(cpu, memory, 0);
+    });
+
+    stubs.registerStub("ole32.dll", "CoCreateInstance", (cpu) => {
+        cpu.regs[REG.EAX] = 0x80040154; // REGDB_E_CLASSNOTREG
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // ==================== advapi32.dll: Registry API ====================
+    // Game reads/writes registry keys for settings. We return ERROR_FILE_NOT_FOUND
+    // for reads and ERROR_SUCCESS for writes, simulating an empty registry.
+
+    const ERROR_SUCCESS = 0;
+    const ERROR_FILE_NOT_FOUND = 2;
+    const ERROR_MORE_DATA = 234;
+    const ERROR_NO_MORE_ITEMS = 259;
+
+    // Fake registry key handle counter and name tracking
+    let nextRegKey = 0xBEEF0200;
+    const regKeyNames = new Map<number, string>(); // handle → key name
+    function readAnsiStr(ptr: number, max = 256): string {
+        let s = "";
+        for (let i = 0; i < max; i++) { const c = memory.read8(ptr + i); if (!c) break; s += String.fromCharCode(c); }
+        return s;
+    }
+    function writeAnsiStr(ptr: number, s: string): void {
+        for (let i = 0; i < s.length; i++) memory.write8(ptr + i, s.charCodeAt(i));
+        memory.write8(ptr + s.length, 0);
+    }
+
+    // Registry values loaded from registry.json in the project root for easy editing
+    const registryValues: RegistryMap = loadRegistryJson();
+
+    function regQueryValue(keyHandle: number, valueName: string): { type: number; value: string | number } | null {
+        const keyName = (regKeyNames.get(keyHandle) ?? "").toLowerCase();
+        const lowerValue = valueName.toLowerCase();
+        // Search by matching suffix of the key name
+        for (const [pattern, values] of Object.entries(registryValues)) {
+            if (keyName.endsWith(pattern) || keyName === pattern) {
+                const v = values[lowerValue];
+                if (v !== undefined) return v;
+            }
+        }
+        return null;
+    }
+
+    // RegOpenKeyA(hKey, lpSubKey, phkResult) - stdcall, 3 args (12 bytes)
+    stubs.registerStub("advapi32.dll", "RegOpenKeyA", (cpu) => {
+        const lpSubKey = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const phkResult = memory.read32((cpu.regs[REG.ESP] + 12) >>> 0);
+        const keyName = lpSubKey ? readAnsiStr(lpSubKey) : "";
+        console.log(`  [Win32] RegOpenKeyA("${keyName}")`);
+        const handle = nextRegKey++;
+        regKeyNames.set(handle, keyName);
+        if (phkResult) memory.write32(phkResult, handle);
+        cpu.regs[REG.EAX] = ERROR_SUCCESS;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // RegOpenKeyExA(hKey, lpSubKey, ulOptions, samDesired, phkResult) - stdcall, 5 args (20 bytes)
+    stubs.registerStub("advapi32.dll", "RegOpenKeyExA", (cpu) => {
+        const hKeyIn = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpSubKey = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const phkResult = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        const keyName = lpSubKey ? readAnsiStr(lpSubKey) : "";
+        // Build full key name by combining parent with subkey
+        const parentName = regKeyNames.get(hKeyIn) ?? `HKEY:${hKeyIn.toString(16)}`;
+        const fullName = keyName ? `${parentName}\\${keyName}` : parentName;
+        console.log(`  [Win32] RegOpenKeyExA(parent=0x${hKeyIn.toString(16)}, "${keyName}") phkResult@0x${phkResult.toString(16)}`);
+        const handle = nextRegKey++;
+        regKeyNames.set(handle, fullName);
+        if (phkResult) memory.write32(phkResult, handle);
+        cpu.regs[REG.EAX] = ERROR_SUCCESS;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // RegOpenKeyExW(hKey, lpSubKey, ulOptions, samDesired, phkResult) - stdcall, 5 args (20 bytes)
+    stubs.registerStub("advapi32.dll", "RegOpenKeyExW", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_FILE_NOT_FOUND;
+        cleanupStdcall(cpu, memory, 20);
+    });
+
+    // RegCreateKeyA(hKey, lpSubKey, phkResult) - stdcall, 3 args (12 bytes)
+    stubs.registerStub("advapi32.dll", "RegCreateKeyA", (cpu) => {
+        // Return a fake handle and success
+        const phkResult = memory.read32(cpu.regs[REG.ESP] + 12); // [ESP+4]=hKey, [ESP+8]=lpSubKey, [ESP+12]=phkResult
+        if (phkResult) memory.write32(phkResult, 0xBEEF0100); // fake registry key handle
+        cpu.regs[REG.EAX] = ERROR_SUCCESS;
+        cleanupStdcall(cpu, memory, 12);
+    });
+
+    // RegCreateKeyExA(hKey, lpSubKey, Reserved, lpClass, dwOptions, samDesired, lpSecurityAttributes, phkResult, lpdwDisposition) - 9 args (36 bytes)
+    stubs.registerStub("advapi32.dll", "RegCreateKeyExA", (cpu) => {
+        const phkResult = memory.read32(cpu.regs[REG.ESP] + 32); // 8th arg
+        if (phkResult) memory.write32(phkResult, 0xBEEF0101);
+        const lpdwDisposition = memory.read32(cpu.regs[REG.ESP] + 36); // 9th arg
+        if (lpdwDisposition) memory.write32(lpdwDisposition, 2); // REG_CREATED_NEW_KEY
+        cpu.regs[REG.EAX] = ERROR_SUCCESS;
+        cleanupStdcall(cpu, memory, 36);
+    });
+
+    // RegQueryValueA(hKey, lpSubKey, lpData, lpcbData) - stdcall, 4 args (16 bytes)
+    stubs.registerStub("advapi32.dll", "RegQueryValueA", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_FILE_NOT_FOUND;
+        cleanupStdcall(cpu, memory, 16);
+    });
+
+    // RegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData) - stdcall, 6 args (24 bytes)
+    stubs.registerStub("advapi32.dll", "RegQueryValueExA", (cpu) => {
+        const hKey = memory.read32((cpu.regs[REG.ESP] + 4) >>> 0);
+        const lpValueName = memory.read32((cpu.regs[REG.ESP] + 8) >>> 0);
+        const lpType = memory.read32((cpu.regs[REG.ESP] + 16) >>> 0);
+        const lpData = memory.read32((cpu.regs[REG.ESP] + 20) >>> 0);
+        const lpcbData = memory.read32((cpu.regs[REG.ESP] + 24) >>> 0);
+        const valueName = lpValueName ? readAnsiStr(lpValueName) : "";
+        const entry = regQueryValue(hKey, valueName);
+        console.log(`  [Win32] RegQueryValueExA(key=0x${hKey.toString(16)}, "${valueName}") -> ${entry ? JSON.stringify(entry.value) : "NOT FOUND"}`);
+        if (!entry) {
+            cpu.regs[REG.EAX] = ERROR_FILE_NOT_FOUND;
+        } else {
+            if (entry.type === 4) { // REG_DWORD
+                const needed = 4;
+                if (lpcbData) {
+                    const cbData = memory.read32(lpcbData);
+                    memory.write32(lpcbData, needed);
+                    if (lpData && cbData >= needed) {
+                        memory.write32(lpData, entry.value as number);
+                    }
+                }
+                if (lpType) memory.write32(lpType, 4);
+            } else { // REG_SZ (type 1)
+                const s = entry.value as string;
+                const needed = s.length + 1;
+                if (lpcbData) {
+                    const cbData = memory.read32(lpcbData);
+                    memory.write32(lpcbData, needed);
+                    if (lpData && cbData >= needed) {
+                        writeAnsiStr(lpData, s);
+                    }
+                }
+                if (lpType) memory.write32(lpType, 1);
+            }
+            cpu.regs[REG.EAX] = ERROR_SUCCESS;
+        }
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // RegQueryValueExW(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData) - stdcall, 6 args (24 bytes)
+    stubs.registerStub("advapi32.dll", "RegQueryValueExW", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_FILE_NOT_FOUND;
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // RegSetValueExA(hKey, lpValueName, Reserved, dwType, lpData, cbData) - stdcall, 6 args (24 bytes)
+    stubs.registerStub("advapi32.dll", "RegSetValueExA", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_SUCCESS; // pretend write succeeded
+        cleanupStdcall(cpu, memory, 24);
+    });
+
+    // RegDeleteValueA(hKey, lpValueName) - stdcall, 2 args (8 bytes)
+    stubs.registerStub("advapi32.dll", "RegDeleteValueA", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_FILE_NOT_FOUND;
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // RegCloseKey(hKey) - stdcall, 1 arg (4 bytes)
+    stubs.registerStub("advapi32.dll", "RegCloseKey", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_SUCCESS;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // RegFlushKey(hKey) - stdcall, 1 arg (4 bytes)
+    stubs.registerStub("advapi32.dll", "RegFlushKey", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_SUCCESS;
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // RegEnumKeyExA(hKey, dwIndex, lpName, lpcchName, lpReserved, lpClass, lpcchClass, lpftLastWriteTime) - 8 args (32 bytes)
+    stubs.registerStub("advapi32.dll", "RegEnumKeyExA", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_NO_MORE_ITEMS;
+        cleanupStdcall(cpu, memory, 32);
+    });
+
+    // RegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, lpType, lpData, lpcbData) - 8 args (32 bytes)
+    stubs.registerStub("advapi32.dll", "RegEnumValueA", (cpu) => {
+        cpu.regs[REG.EAX] = ERROR_NO_MORE_ITEMS;
+        cleanupStdcall(cpu, memory, 32);
+    });
+
+    // ==================== advapi32.dll: Event Log API ====================
+    // OpenEventLogA(lpUNCServerName, lpSourceName) - stdcall, 2 args (8 bytes)
+    stubs.registerStub("advapi32.dll", "OpenEventLogA", (cpu) => {
+        cpu.regs[REG.EAX] = 0xBEEF0200; // fake event log handle
+        cleanupStdcall(cpu, memory, 8);
+    });
+
+    // ReportEventA(hEventLog, wType, wCategory, dwEventID, lpUserSid, wNumStrings, dwDataSize, lpStrings, lpRawData) - 9 args (36 bytes)
+    stubs.registerStub("advapi32.dll", "ReportEventA", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE = success
+        cleanupStdcall(cpu, memory, 36);
+    });
+
+    // CloseEventLog(hEventLog) - stdcall, 1 arg (4 bytes)
+    stubs.registerStub("advapi32.dll", "CloseEventLog", (cpu) => {
+        cpu.regs[REG.EAX] = 1; // TRUE = success
+        cleanupStdcall(cpu, memory, 4);
+    });
+
+    // ==================== advapi32.dll: Security/User API ====================
+    // GetUserNameA(lpBuffer, pcbBuffer) - stdcall, 2 args (8 bytes)
+    stubs.registerStub("advapi32.dll", "GetUserNameA", (cpu) => {
+        const lpBuffer = memory.read32(cpu.regs[REG.ESP] + 4);
+        const pcbBuffer = memory.read32(cpu.regs[REG.ESP] + 8);
+        const username = "Player\0";
+        if (lpBuffer && pcbBuffer) {
+            const maxLen = memory.read32(pcbBuffer);
+            for (let i = 0; i < Math.min(username.length, maxLen); i++) {
+                memory.write8(lpBuffer + i, username.charCodeAt(i));
+            }
+            memory.write32(pcbBuffer, username.length);
+        }
+        cpu.regs[REG.EAX] = 1; // TRUE = success
+        cleanupStdcall(cpu, memory, 8);
     });
 
     console.log(`[Win32Stubs] Registered ${stubs.count} API stubs in memory at 0x${STUB_BASE.toString(16)}`);

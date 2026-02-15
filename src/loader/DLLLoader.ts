@@ -353,6 +353,37 @@ export class DLLLoader {
     }
 
     /**
+     * Patch DLL export addresses in-place with INT 0xFE; RET trampolines.
+     * This catches calls that go through DLL export forwarding chains
+     * (e.g. DLL code calling TlsGetValue through an api-ms-win-* export)
+     * which bypass IAT patching entirely.
+     */
+    patchDLLExports(memory: Memory, win32Stubs: Win32Stubs): void {
+        let patchedCount = 0;
+
+        for (const [dllName, dll] of this._loadedDLLs) {
+            for (const [funcName, exportAddr] of dll.exports) {
+                // Skip ordinal-only exports
+                if (funcName.startsWith('Ordinal #')) continue;
+
+                // Check if we have a stub for this function name
+                const stubEntry = win32Stubs.findStubByFuncName(funcName);
+                if (!stubEntry) continue;
+
+                // Don't patch addresses in our stub region (already trampolines)
+                if (exportAddr >= 0x00200000 && exportAddr < 0x00210000) continue;
+
+                // Overwrite the first 3 bytes at the export address with INT 0xFE; RET
+                // and register it as a patched address pointing to the same handler
+                win32Stubs.patchAddress(exportAddr, `${dllName}!${funcName}`, stubEntry.handler);
+                patchedCount++;
+            }
+        }
+
+        console.log(`[DLLLoader] Patched ${patchedCount} DLL export addresses with stub trampolines`);
+    }
+
+    /**
      * Get the address of an exported function
      */
     getExportAddress(dllName: string, functionName: string): number | null {

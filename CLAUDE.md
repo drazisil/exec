@@ -20,19 +20,21 @@ The tsconfig uses `rewriteRelativeImportExtensions: true` to handle this for com
 ## Current Status
 
 Emulator completes the **entire CRT startup** (mainCRTStartup → _initterm → main())
-and enters game code. Game initializes, creates a "Chat Filter" worker thread via
-CreateThread, calls ResumeThread, and enters its main Sleep loop waiting for the
-thread. Execution reaches 10M steps in valid game code at ~0x004cf72f (game main loop).
+and enters game code. The Chat Filter worker thread runs cooperatively (1M steps per
+Sleep() call from the main thread). The thread calls `DeleteFileA`, `CreateFileA`
+(GENERIC_WRITE gets a fake handle), and is progressing through `Paths_Init()` which
+checks the registry for installation data. Registry values are now loaded from
+`registry.json` in the project root for easy editing.
 
-The game outputs: `"Created Chat Filter thread, Handle = 0xBEEF"` confirming
-game initialization code is running correctly.
+The game outputs: `"Created Chat Filter thread, Handle = 0xBEEF"` and the thread
+proceeds to initialize file logging and check installation paths via the registry.
 
 ### Win32 API Stub System
 Instead of executing real DLL code (which needs Windows kernel structures), we
 intercept IAT calls via `INT 0xFE` trampolines at `0x00200000`. Each stub is a
 JS function that reads args from the stack, sets EAX, and does stdcall/cdecl cleanup.
 
-**~150+ stubs implemented** covering:
+**~160+ stubs implemented** covering:
 - CRT startup: GetVersion, GetCommandLineA/W, GetStartupInfoA, HeapCreate/Alloc/Free
 - String functions: MultiByteToWideChar, WideCharToMultiByte, LCMapStringA/W, lstrlenA
 - Process/module: GetModuleHandleA/W, GetModuleFileNameA/W, GetCurrentProcessId
@@ -41,12 +43,15 @@ JS function that reads args from the stack, sets EAX, and does stdcall/cdecl cle
 - TLS: TlsAlloc/GetValue/SetValue/Free, InterlockedIncrement/Decrement/Exchange
 - Sync: CreateMutexA, OpenMutexA, ReleaseMutex, CreateEventA, SetEvent, CloseHandle
 - I/O: GetStdHandle, SetStdHandle, WriteFile, SetHandleCount, GetFileType, CreateFileA
+- File ops: DeleteFileA/W, FindFirstFileA/W, FindNextFileA/W, FindClose, CompareFileTime
 - Time: GetLocalTime, GetSystemTime, GetTickCount, QueryPerformanceCounter/Frequency
 - Locale: GetACP, GetOEMCP, GetCPInfo, GetLocaleInfoA/W, CompareStringA/W
 - Environment: GetEnvironmentStringsA/W, SetEnvironmentVariableA/W
 - Directory: GetCurrentDirectoryA, SetCurrentDirectoryA, GetWindowsDirectoryA
 - Error: GetLastError, SetLastError, IsProcessorFeaturePresent
 - USER32: MessageBoxA/W, GetActiveWindow, GetLastActivePopup
+- Registry: RegOpenKeyA/ExA, RegQueryValueA/ExA, RegCloseKey, RegSetValueExA
+- INI files: GetPrivateProfileStringA/IntA, WritePrivateProfileStringA
 - Misc: IsBadReadPtr/WritePtr/CodePtr, OutputDebugStringA, SetErrorMode
 - CRT patches: _CrtDbgReport (suppresses debug assertions), _sbh_heap_init, __sbh_alloc_block
 
@@ -73,9 +78,18 @@ patches ~239 of ~7867 DLL IAT entries (the rest go to functions we haven't stubb
 - **0x66 operand-size prefix ignored**: MOV r/m32,imm32 was consuming 4 bytes of
   immediate even with 0x66 prefix (should be 2), misaligning all subsequent EIPs.
 
+- **HeapReAlloc missing data copy**: New block returned without copying old data,
+  causing atexit function table to contain 0xCDCDCDCD (MSVC debug heap fill).
+- **LDS/LES opcodes (0xC5/0xC4) missing**: Game code called LDS which halted; added
+  both opcodes (ignoring segment register in flat memory model, just load 32-bit ptr).
+- **DeleteFileA not stubbed**: Fell through to real KERNEL32→KERNELBASE→ntdll code
+  which accessed uninitialized ntdll globals and crashed at 3.4M steps.
+- **CreateFileA returning INVALID_HANDLE_VALUE for all**: Chat filter logging retried
+  indefinitely; fixed to return fake handles (0x5000+) for GENERIC_WRITE operations.
+
 ### Step Count Progression
-16 → 494 → 3043 → 8114 → 21094 → 22929 → 46,966 → 594,553 → 627,122 → 10,000,000+
-(594K = CRT finished, 627K = after _CrtDbgReport patch, 10M+ = game main loop)
+16 → 494 → 3043 → 8114 → 21094 → 22929 → 46,966 → 594,553 → 627,122 → 10,000,000+ → 3,887,539 (thread ran)
+(594K = CRT finished, 627K = after _CrtDbgReport patch, 10M+ = game main loop with thread running)
 
 ## Project Structure
 
@@ -130,7 +144,7 @@ run-exe.ts uses 2GB. Electron uses fallback (256MB down to 32MB).
 - IAT resolution: all 354 imports resolved, IAT stubs written
 - DLL IAT patching: loaded DLLs' IATs redirected to stubs (239/7867 entries)
 - API forwarding: api-ms-win-* DLLs forward to kernel32/ntdll/etc
-- Win32 API stubs: ~150+ functions stubbed with JS handlers via INT 0xFE
+- Win32 API stubs: ~160+ functions stubbed with JS handlers via INT 0xFE
 - x87 FPU: full emulation of 0xD8-0xDF (FLD/FST/FADD/FMUL/FDIV/FCOM/FNSTSW etc.)
 - CPU: ~90+ opcodes, ModR/M addressing, segment overrides (FS/GS), 0x66 prefix
 - TEB/PEB: allocated and initialized with stack bounds
@@ -142,16 +156,15 @@ run-exe.ts uses 2GB. Electron uses fallback (256MB down to 32MB).
 
 ## What Doesn't Work Yet
 
-1. **Threading** - CreateThread returns a fake handle but doesn't execute the thread
-   function. Game creates a "Chat Filter" thread and waits for it in a Sleep loop.
-   Need to either: (a) run thread functions inline, or (b) implement cooperative
-   thread scheduling.
+1. **Paths_Init registry check** - Chat Filter thread calls Paths_Init() which reads
+   install paths from registry. instLev=2 now works; SrcDrive and other keys added
+   to registry.json. May still fail if other keys are missing.
 2. **Some imports still unstubbed** - main exe has ~354 imports, most are stubbed but
    some less common ones may still hit real DLL code.
 3. **No SEH (Structured Exception Handling)** - game code sets up SEH frames but
    we don't dispatch exceptions through them yet
-4. **File I/O returns failure** - CreateFileA/ReadFile stubbed but return failure.
-   Game will need actual file reading for assets.
+4. **File I/O returns partial success** - CreateFileA returns fake handles for writes;
+   ReadFile still returns failure. Game will need actual file reading for assets.
 5. **No windowing** - USER32/GDI32 functions not yet stubbed
 6. **VRAM visualization untested** - needs game to actually write pixels
 7. **Debug CRT assertions suppressed** - _CrtDbgReport patched to return 0. The debug
@@ -171,6 +184,12 @@ DLLs are real Windows PE files loaded from `/data/Downloads/`. The loader:
 ### DLL Search Paths (in run-exe.ts)
 The long array in run-exe.ts lists directories containing DLL files.
 Each directory should contain the extracted DLL (without .dll extension in the path).
+
+### Fake Registry (registry.json)
+`registry.json` in the project root holds the fake Windows registry values served
+to the game. Keys and value names are case-insensitive (normalized to lowercase).
+Value types: 1=REG_SZ (string), 4=REG_DWORD (32-bit int). Keys starting with `_`
+are treated as comments. Edit this file to add or change values without touching code.
 
 ### Segment Overrides
 FS register points to TEB base (0x00320000). When code does `FS:[offset]`,
@@ -195,10 +214,9 @@ npm start
 
 ## Next Steps (Priority Order)
 
-1. **Thread execution** - Game creates a "Chat Filter" thread (startAddr=0x9f58f0)
-   and waits for it. Need to either: (a) execute the thread function inline before
-   returning from CreateThread, (b) implement cooperative scheduling, or (c) detect
-   what the thread sets and fake it. Option (a) is simplest to try first.
+1. **Get past Paths_Init** - Edit `registry.json` to add missing registry values
+   until the "Registry is most likely incorrect" error goes away. Then see what
+   the thread does next.
 
 2. **File I/O** - Game will need CreateFileA, ReadFile, GetFileSize etc. to load
    assets. Need either a virtual filesystem or passthrough to real files on disk.

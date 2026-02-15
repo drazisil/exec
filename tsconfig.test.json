@@ -11,10 +11,11 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "declaration": true,
+    "declaration": false,
     "sourceMap": true,
     "noEmit": false,
-    "rewriteRelativeImportExtensions": true,
+    "noImplicitAny": false,
+    "verbatimModuleSyntax": false,
     "moduleResolution": "node",
     "baseUrl": ".",
     "paths": {
@@ -25,11 +26,9 @@
     }
   },
   "include": [
-    "electron-main.ts",
-    "electron-preload.ts",
-    "run-exe.ts",
-    "src/**/*.ts",
-    "tests/**/*.ts",
-    "vitest.config.ts"
+    "tests/**/*.ts"
+  ],
+  "exclude": [
+    "dist"
   ]
 }
